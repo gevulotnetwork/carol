@@ -69,14 +69,13 @@ pub type Pool = managed::Pool<PoolManager>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempdir::TempDir;
 
     #[tokio::test]
     async fn test_pool_build() {
-        let tmp_database = TempDir::new("carol.test.database").unwrap();
+        let tmp_database = tempfile::tempdir().unwrap();
         let database = tmp_database.path().join("carol.sqlite");
         let database_path = database.as_os_str().to_str().unwrap().to_string();
-        let tmp_cache_dir = TempDir::new("carol.test.database").unwrap();
+        let tmp_cache_dir = tempfile::tempdir().unwrap();
 
         let mgr = PoolManager::new(&database_path, tmp_cache_dir.path());
         let pool = Pool::builder(mgr).max_size(16).build().expect("build pool");
@@ -96,10 +95,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_pool() {
-        let tmp_database = TempDir::new("carol.test.database").unwrap();
+        let tmp_database = tempfile::tempdir().unwrap();
         let database = tmp_database.path().join("carol.sqlite");
         let database_path = database.as_os_str().to_str().unwrap().to_string();
-        let tmp_cache_dir = TempDir::new("carol.test.database").unwrap();
+        let tmp_cache_dir = tempfile::tempdir().unwrap();
 
         let mgr = PoolManager::new(&database_path, tmp_cache_dir.path());
         let pool = Pool::builder(mgr).max_size(1).build().expect("build pool");

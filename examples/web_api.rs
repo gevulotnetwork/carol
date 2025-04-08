@@ -50,7 +50,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // This client builder will be used in our clients pool
-    let client_builder = Client::builder(DATABASE_URL, CACHE_DIR)
+    let mut client_builder = Client::builder(DATABASE_URL, CACHE_DIR);
+    client_builder
         .default_file_duration(Duration::from_secs(30))
         .download_retry_policy(RetryPolicy::Fixed {
             number: 3,

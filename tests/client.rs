@@ -1,7 +1,6 @@
 //! Client integration tests.
 
 use std::process::{Command, Stdio};
-use tempdir::TempDir;
 use tokio::fs;
 
 use carol::pool::{Pool, PoolManager};
@@ -21,7 +20,7 @@ where
 
 #[tokio::test]
 async fn test_with_one_file() -> anyhow::Result<()> {
-    let tmp = TempDir::new("carol.test")?;
+    let tmp = tempfile::tempdir()?;
     let db_path = tmp.path().join("carol.sqlite");
     let db_path_str = format!("{}", db_path.display());
     let cache_dir = tmp.path().join("files");
@@ -43,7 +42,7 @@ async fn test_with_one_file() -> anyhow::Result<()> {
 async fn test_with_many_files() -> anyhow::Result<()> {
     // This test shows how to use connection pool to fetch multiple files at the same time
 
-    let tmp = TempDir::new("carol.test")?;
+    let tmp = tempfile::tempdir()?;
     let db_path = tmp.path().join("carol.sqlite");
     let db_path_str = format!("{}", db_path.display());
     let cache_dir = tmp.path().join("files");

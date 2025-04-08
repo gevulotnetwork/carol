@@ -49,6 +49,7 @@ pub use cleaner::CacheCleaner;
 /// Maintenance options. Use [`MaintenanceOptsBuilder`] to create.
 #[derive(Default, Builder, Debug)]
 #[builder(setter(into))]
+#[builder(default)]
 pub struct MaintenanceOpts {
     /// Run cache cleaning.
     ///
@@ -250,3 +251,109 @@ impl<'c> MaintenanceRunner<'c> {
 
 // TODO: Asynchronously handle files in maintenance runner.
 //       Right now we synchronously iterate over files, which is not efficient.
+
+// #[cfg(test)]
+// mod fixtures {
+//     use super::{MaintenanceOpts, MaintenanceRunner};
+//     use crate::client::fixtures::ClientFixture;
+//     use crate::database::api;
+//     use crate::FileStatus;
+//     use tokio::fs;
+
+//     type Error = Box<dyn std::error::Error>;
+
+//     pub struct CarolFixture {
+//         pub client: ClientFixture,
+//     }
+
+//     impl CarolFixture {
+//         pub async fn new() -> Result<Self, Error> {
+//             Ok(Self {
+//                 client: ClientFixture::new().await?,
+//             })
+//         }
+
+//         pub fn runner(&mut self) -> MaintenanceRunner {
+//             MaintenanceRunner::new(
+//                 &mut self.client.client,
+//                 MaintenanceOpts::builder().build().unwrap(),
+//             )
+//         }
+
+//         pub async fn with_entry(mut self) -> Result<Self, Error> {
+//             let url = format!("{}/file.txt", &self.client.host);
+//             let file = self.client.client.get(&url).await?;
+//             file.release().await?;
+//             Ok(self)
+//         }
+
+//         pub async fn remove_file(mut self) -> Result<Self, Error> {
+//             self = self.with_entry().await?;
+//             let url = format!("{}/file.txt", &self.client.host);
+//             let file = self.client.client.find(&url).await?.unwrap();
+//             fs::remove_file(file.cache_path()).await?;
+//             file.release().await?;
+//             Ok(self)
+//         }
+
+//         pub async fn with_corrupted_entry(mut self) -> Result<Self, Error> {
+//             self = self.with_entry().await?;
+//             let url = format!("{}/file.txt", &self.client.host);
+//             let pk = api::get_by_url(&mut self.client.client.db, &url)
+//                 .await?
+//                 .unwrap()
+//                 .id;
+//             api::update_status(&mut self.client.client.db, pk, FileStatus::Corrupted).await?;
+//             Ok(self)
+//         }
+//     }
+// }
+
+// #[cfg(test)]
+// mod tests {
+//     use super::fixtures::CarolFixture;
+//     use crate::FileStatus;
+//     use tracing_test::traced_test;
+
+//     #[tokio::test]
+//     #[traced_test]
+//     async fn test_find_corrupted_cache_entries() {
+//         let mut fixture = CarolFixture::new()
+//             .await
+//             .unwrap()
+//             .remove_file()
+//             .await
+//             .unwrap();
+//         let mut runner = fixture.runner();
+
+//         runner
+//             .find_corrupted_cache_entries()
+//             .await
+//             .expect("find corrupted cache entries");
+
+//         let url = format!("{}/file.txt", &fixture.client.host);
+//         let file = fixture.client.client.get(&url).await.unwrap();
+//         assert_eq!(file.status().await.unwrap(), FileStatus::Corrupted);
+//     }
+
+//     #[tokio::test]
+//     #[traced_test]
+//     async fn test_remove_corrupted_cache_entries() {
+//         let mut fixture = CarolFixture::new()
+//             .await
+//             .unwrap()
+//             .with_corrupted_entry()
+//             .await
+//             .unwrap();
+//         let mut runner = fixture.runner();
+
+//         runner
+//             .remove_corrupted_entries()
+//             .await
+//             .expect("remove corrupted cache entries");
+
+//         let url = format!("{}/file.txt", &fixture.client.host);
+//         let file = fixture.client.client.find(&url).await.unwrap();
+//         assert!(file.is_none());
+//     }
+// }

@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use reqwest::Client as ReqwestClient;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, Error as IoError};
 use tokio::time;
 use tokio_stream::StreamExt;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, trace};
 
 use crate::database::models::CacheEntry;
 use crate::database::{self, api, Connection};
-use crate::errors::{Error, NonUtf8PathError};
+use crate::errors::{CleanUpError, DatabaseError, Error, NonUtf8PathError};
 use crate::{DateTime, File, FileStatus, RetryPolicy, Utc};
 
 type StdResult<T, E> = std::result::Result<T, E>;
@@ -44,7 +44,7 @@ impl ClientBuilder {
     /// Set [`reqwest::Client`] to use for downloading.
     ///
     /// If not set, [`Client`] will build default [`reqwest::Client`] on initialization.
-    pub fn reqwest_client(mut self, reqwest_client: ReqwestClient) -> Self {
+    pub fn reqwest_client(&mut self, reqwest_client: ReqwestClient) -> &mut Self {
         self.reqwest_client = Some(reqwest_client);
         self
     }
@@ -54,7 +54,7 @@ impl ClientBuilder {
     /// `duration` will be added to [`Utc::now()`] and set as an expiration timestamp when
     /// downloading a file. If not set, new files won't have any expiration timestamp and
     /// will never expire.
-    pub fn default_file_duration(mut self, duration: Duration) -> Self {
+    pub fn default_file_duration(&mut self, duration: Duration) -> &mut Self {
         self.default_file_duration = Some(duration);
         self
     }
@@ -63,7 +63,7 @@ impl ClientBuilder {
     /// Applies only to downloading process during [`Client::get`].
     ///
     /// If not set, [`RetryPolicy::None`] will be used.
-    pub fn download_retry_policy(mut self, policy: RetryPolicy) -> Self {
+    pub fn download_retry_policy(&mut self, policy: RetryPolicy) -> &mut Self {
         self.download_retry_policy = policy;
         self
     }
@@ -172,33 +172,26 @@ impl Client {
         )
         .await;
 
-        let entry = match result {
+        match result {
             Ok(entry) => {
                 // File was not in cache, so let's download it
                 debug!("cache miss: {:?}", entry);
-                let result = self.fetch_entry(&entry).await;
-                match result {
-                    Ok(entry) => entry,
-                    Err(err) => match self.download_retry_policy {
-                        RetryPolicy::None => return Err(err),
-                        RetryPolicy::Fixed { number, period } => {
-                            let mut result = Err(err);
-
-                            // retry cycle
-                            for i in 0..number {
-                                time::sleep(period).await;
-                                debug!("retrying fetch URL '{}', attempt #{}", entry.url, i + 1);
-                                match self.fetch_entry(&entry).await {
-                                    Ok(entry) => {
-                                        result = Ok(entry);
-                                        break;
-                                    }
-                                    Err(err) => result = Err(err),
-                                }
-                            }
-
-                            // latest occured error will be thrown
-                            result?
+                match self.fetch_entry_with_retry(&entry).await {
+                    Ok(entry) => {
+                        // At this point file was downloaded and stored in cache
+                        // If this function fails, it means that we only failed
+                        // to increment the reference counter. So it is safe
+                        // to just return an error here and let user call `get()` again.
+                        self.create_locked_file(entry).await
+                    }
+                    Err(download_error) => match self.cleanup_entry(&entry).await {
+                        Ok(_) => Err(download_error),
+                        Err((remove_file_error, database_error)) => {
+                            Err(Error::CleanUpError(Box::new(CleanUpError {
+                                remove_file_error,
+                                database_error,
+                                download_error,
+                            })))
                         }
                     },
                 }
@@ -206,16 +199,16 @@ impl Client {
             Err(err) if err.is_unique_violation() => {
                 // File is already in cache
                 debug!("cache hit: {}", url);
-                self.wait_entry(url).await?
-            }
-            Err(err) => return Err(err.into()),
-        };
+                let entry = self.wait_entry(url).await?;
 
-        // At this point file was downloaded and stored in cache
-        // If this function fails, it means that we only failed
-        // to increment the reference counter. So it is safe
-        // to just return an error here and let user call `get()` again.
-        self.create_locked_file(entry).await
+                // At this point file was downloaded and stored in cache
+                // If this function fails, it means that we only failed
+                // to increment the reference counter. So it is safe
+                // to just return an error here and let user call `get()` again.
+                self.create_locked_file(entry).await
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Find file by URL in cache. Returns `None` is URL is not cached.
@@ -390,84 +383,81 @@ impl Client {
         }
     }
 
-    /// Query entry URL and store response body in target file. Then update entry status.
-    /// If anything fails during this process, clean-up trimmed file and cache entry.
-    async fn fetch_entry(&mut self, entry: &CacheEntry) -> Result<CacheEntry> {
-        let mut file = fs::File::create_new(&entry.cache_path).await?;
+    /// Fetch entry with respect to donwloading retry policy.
+    async fn fetch_entry_with_retry(&mut self, entry: &CacheEntry) -> Result<CacheEntry> {
+        match self.fetch_entry(entry).await {
+            Ok(entry) => Ok(entry),
+            Err(err) => match self.download_retry_policy {
+                RetryPolicy::None => Err(err),
+                RetryPolicy::Fixed { number, period } => {
+                    let mut result = Err(err);
 
-        let mut fetch = async || -> Result<CacheEntry> {
-            trace!("fetching {}", &entry.url);
-            let response = self
-                .reqwest_client
-                .get(&entry.url)
-                .send()
-                .await?
-                .error_for_status()?;
-            let code = response.status().as_u16();
-            if code != 200 {
-                // For responses with 2XX codes we probably only interested in 200.
-                return Err(Error::CustomError(format!(
-                    "HTTP response status code {}",
-                    code
-                )));
-            }
-            let mut stream = response.bytes_stream();
-            while let Some(chunk_result) = stream.next().await {
-                let chunk = chunk_result?;
-                file.write_all(&chunk).await?;
-            }
-            let updated_entry =
-                api::update_status(&mut self.db, entry.id, FileStatus::Ready).await?;
-            Ok(updated_entry)
-        };
+                    // retry cycle
+                    for i in 0..number {
+                        time::sleep(period).await;
+                        debug!("retrying fetch URL '{}', attempt #{}", entry.url, i + 1);
+                        match self.fetch_entry(entry).await {
+                            Ok(entry) => {
+                                result = Ok(entry);
+                                break;
+                            }
+                            Err(err) => result = Err(err),
+                        }
+                    }
 
-        match fetch().await {
-            Ok(updated_entry) => Ok(updated_entry),
-            Err(err) => {
-                // cleanup before returning
-                // just log error because we already have main error to return
-                let failed_to_update = api::update_status(&mut self.db, entry.id, FileStatus::Corrupted)
-                    .await
-                    .map_err(|err| warn!("failed to mark file, which was not downloaded successfully, as corrupted: {}", err))
-                    .is_err();
-
-                let failed_to_remove = fs::remove_file(&entry.cache_path)
-                    .await
-                    .map_err(|err| {
-                        warn!(
-                            "failed to remove file, which was not downloaded successfully: {}",
-                            err
-                        )
-                    })
-                    .is_err();
-
-                let failed_to_remove_entry = api::remove_entry(&mut self.db, entry.id)
-                    .await
-                    .map_err(|err| {
-                        warn!(
-                        "failed to remove cache entry, which was not downloaded successfully: {}",
-                        err
-                    )
-                    })
-                    .is_err();
-
-                let corrupted = failed_to_update && failed_to_remove && failed_to_remove_entry;
-                if corrupted {
-                    // This is a very annoying error for user, because he can't do much about it.
-                    // User will have to remove the file manually.
-                    // Maintenance cannot fix this automatically because the file wasn't marked
-                    // as Corrupted or ToRemove and was not removed from cache directory.
-                    // FIXME: there must be something we could do here
-                    error!(
-                        "Failed to download URL: {}. \
-                        This error probably means that your cache state is now corrupted.\
-                        Try removing this URL manually using Carol CLI: carol files remove --force '{}'",
-                        entry.url, entry.url
-                    );
+                    // latest occured error will be thrown
+                    result
                 }
+            },
+        }
+    }
 
-                Err(err)
+    /// Query entry URL and store response body in target file.
+    /// Then set entry status to `Ready`.
+    async fn fetch_entry(&mut self, entry: &CacheEntry) -> Result<CacheEntry> {
+        let mut file = fs::File::create(&entry.cache_path).await?;
+
+        trace!("fetching {}", &entry.url);
+        let response = self
+            .reqwest_client
+            .get(&entry.url)
+            .send()
+            .await?
+            .error_for_status()?;
+        let code = response.status().as_u16();
+        if code != 200 {
+            // For responses with 2XX codes we probably only interested in 200.
+            return Err(Error::CustomError(format!(
+                "HTTP response status code {}",
+                code
+            )));
+        }
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            file.write_all(&chunk).await?;
+        }
+        let updated_entry = api::update_status(&mut self.db, entry.id, FileStatus::Ready).await?;
+        Ok(updated_entry)
+    }
+
+    /// Clean-up entry: remove file from cache directory and remove cache entry from database.
+    ///
+    /// Returns errors if both operations failed.
+    async fn cleanup_entry(
+        &mut self,
+        entry: &CacheEntry,
+    ) -> StdResult<(), (IoError, DatabaseError)> {
+        let file_result = fs::remove_file(&entry.cache_path).await;
+        let entry_result = unsafe { api::delete_unsafe(&mut self.db, entry.id) }.await;
+        match (file_result, entry_result) {
+            (Err(file_error), Err(entry_error)) => {
+                // This is a severe clean-up error, which cannot be resolved automatically
+                // Corrupted file is left in a cache, but Carol has no identification about
+                // this entry being corrupt.
+                Err((file_error, entry_error))
             }
+            _ => Ok(()),
         }
     }
 
@@ -529,165 +519,237 @@ impl fmt::Debug for Client {
 /// Client fixtures. Helps in testing client-related code.
 #[cfg(test)]
 pub(crate) mod fixtures {
-    use crate::database::fixtures::CacheDatabaseFixture;
+    use super::ReqwestClient;
+    use crate::database::fixtures::{database, CacheDatabaseFixture};
+    use crate::database::models::{CacheEntry, NewCacheEntry};
     use crate::{Client, RetryPolicy};
+    use crate::{DateTime, FileStatus, Utc};
     use http_test_server::http::{Method, Status};
     use http_test_server::TestServer;
-    use std::path::PathBuf;
+    use rstest::fixture;
     use std::time::Duration;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
+    use tokio::fs;
+    use tracing::trace;
 
-    type Error = Box<dyn std::error::Error>;
+    pub const PORT: u16 = 44256;
+    pub const DEFAULT_PATH: &str = "/file.txt";
+    pub const DEFAULT_URL: &str = "http://localhost:44256/file.txt";
+    pub const DEFAULT_CONTENT: &str = "This is test file.";
 
-    /// Just keeps temp web server running and stops on drop.
-    /// Returns also host string e.g. `http://localhost:8080`.
-    pub fn setup_test_server() -> Result<(TestServer, String), Error> {
-        let server = TestServer::new()?;
-        let resource = server.create_resource("/file.txt");
+    /// Test HTTP server with a single resource on `http://localhost:44256/file.txt`.
+    #[fixture]
+    #[once]
+    pub fn test_server() -> TestServer {
+        let server = TestServer::new_with_port(PORT).unwrap();
+        let resource = server.create_resource(DEFAULT_PATH);
         resource
             .status(Status::OK)
             .method(Method::GET)
             .header("Content-Type", "text/plain")
-            .body("This is test file.");
-        let port = server.port();
-        let host = format!("http://localhost:{}", port);
-        Ok((server, host))
+            .body(DEFAULT_CONTENT);
+        server
     }
 
-    pub struct ClientFixture {
-        /// Holds test web server running and destroys it on drop.
-        #[allow(dead_code)]
-        web_server: Option<TestServer>,
-
-        /// Host string like `http://localhost:8080`.
-        pub host: String,
-
+    /// Fixture for initialized cache.
+    pub struct CacheFixture {
         /// Client with temp database and cache directory.
         pub client: Client,
 
         /// Hold cache directory and destroys it on drop.
-        #[allow(dead_code)]
-        tmp: TempDir,
-
-        /// Path to cache directory.
-        pub cache_dir: PathBuf,
+        pub cache_dir: TempDir,
 
         /// Database fixture.
         pub db: CacheDatabaseFixture,
     }
 
-    impl ClientFixture {
-        /// Create new client with empty cache.
-        pub async fn new() -> Result<Self, Error> {
-            let (web_server, host) = setup_test_server()?;
-            let db = CacheDatabaseFixture::new().await?;
-            let tmp = TempDir::new("carol.test.files").unwrap();
-            let cache_dir = tmp.path().to_path_buf();
-            let client = Client::builder(&db.db_path, &cache_dir)
-                .download_retry_policy(RetryPolicy::Fixed {
-                    number: 3,
-                    period: Duration::from_secs(1),
-                })
-                .build()
-                .await?;
-            Ok(Self {
-                web_server: Some(web_server),
-                host,
+    impl CacheFixture {
+        pub async fn new(
+            db: CacheDatabaseFixture,
+            retry_policy: RetryPolicy,
+            file_duration: Option<Duration>,
+            reqwest_client: Option<ReqwestClient>,
+        ) -> Self {
+            trace!("creating CacheFixture");
+            let cache_dir = tempfile::tempdir().unwrap();
+            let mut client_builder = Client::builder(&db.db_path, cache_dir.path());
+            if let Some(duration) = file_duration {
+                client_builder.default_file_duration(duration);
+            }
+            if let Some(client) = reqwest_client {
+                client_builder.reqwest_client(client);
+            }
+            client_builder.download_retry_policy(retry_policy);
+            trace!(
+                "building client in cache fixture from: {:?}",
+                &client_builder
+            );
+            let client = client_builder.build().await.unwrap();
+            CacheFixture {
                 client,
                 db,
-                tmp,
                 cache_dir,
-            })
+            }
         }
+    }
 
-        pub fn drop_web_server(&mut self) -> TestServer {
-            std::mem::take(&mut self.web_server).unwrap()
-        }
+    /// New empty cache.
+    #[fixture]
+    #[awt]
+    pub async fn cache(
+        #[default(RetryPolicy::None)] retry_policy: RetryPolicy,
+        #[default(None)] file_duration: Option<Duration>,
+        #[default(None)] reqwest_client: Option<ReqwestClient>,
+        #[future] database: CacheDatabaseFixture,
+    ) -> CacheFixture {
+        CacheFixture::new(database, retry_policy, file_duration, reqwest_client).await
+    }
+
+    pub type CacheWithFileFixture = (CacheFixture, CacheEntry);
+
+    /// New cache with a signle file stored.
+    #[fixture]
+    #[awt]
+    pub async fn cache_with_file(
+        #[default(DEFAULT_URL)] url: impl AsRef<str>,
+        #[default(FileStatus::Ready)] status: FileStatus,
+        #[default(None)] expires: Option<DateTime<Utc>>,
+        #[default(0)] ref_count: i32,
+        // This default value is sha256 of default url
+        #[default("1f8b6bd39e9e70cc634217b4686e25c715c82f3fe364c6454399e0aa60118ea4")]
+        filename: impl AsRef<str>,
+        #[default(DEFAULT_CONTENT)] content: impl AsRef<str>,
+        #[default(RetryPolicy::None)] retry_policy: RetryPolicy,
+        #[default(None)] file_duration: Option<Duration>,
+        #[default(None)] reqwest_client: Option<ReqwestClient>,
+        #[future] database: CacheDatabaseFixture,
+    ) -> CacheWithFileFixture {
+        trace!("IN cache_with_file");
+        let mut cache =
+            CacheFixture::new(database, retry_policy, file_duration, reqwest_client).await;
+        let cache_path = cache
+            .cache_dir
+            .path()
+            .join(filename.as_ref())
+            .to_str()
+            .unwrap()
+            .to_string();
+        fs::write(&cache_path, content.as_ref()).await.unwrap();
+        let entry = cache
+            .db
+            .insert_entry(NewCacheEntry {
+                url: url.as_ref().to_string(),
+                cache_path,
+                created: Utc::now(),
+                expires,
+                status,
+                ref_count,
+            })
+            .await;
+        (cache, entry)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::ClientFixture;
-    use super::*;
-    use crate::errors::{DatabaseError, RemoveErrorReason};
+    use super::fixtures::{
+        cache, cache_with_file, test_server, CacheFixture, CacheWithFileFixture, DEFAULT_CONTENT,
+        DEFAULT_URL,
+    };
+    use super::Client;
+    use crate::database::api;
+    use crate::{DateTime, FileStatus, RetryPolicy, Utc};
+    use http_test_server::TestServer;
+    use rstest::rstest;
     use std::time::Duration;
-    use tempdir::TempDir;
     use tokio::fs;
+    use tracing::trace;
     use tracing_test::traced_test;
 
     #[tokio::test]
     #[traced_test]
     async fn test_init_new_cache() {
-        let tmp_database = TempDir::new("carol.test.database").unwrap();
+        let tmp_database = tempfile::tempdir().unwrap();
         let database = tmp_database.path().join("carol.sqlite");
         let database_path = database.as_os_str().to_str().unwrap().to_string();
 
-        let tmp_cache_dir = TempDir::new("carol.test.database").unwrap();
+        let tmp_cache_dir = tempfile::tempdir().unwrap();
 
         Client::init(&database_path, tmp_cache_dir.path())
             .await
             .expect("initialize new cache");
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_connect_to_existing_cache() {
-        let fixture = ClientFixture::new().await.unwrap();
-
-        Client::init(&fixture.db.db_path, &fixture.cache_dir)
+    #[awt]
+    async fn test_connect_to_existing_cache(#[future] cache: CacheFixture) {
+        trace!("begin test");
+        Client::init(&cache.db.db_path, &cache.cache_dir)
             .await
             .expect("connect to existing cache");
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_get() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        let file = client.get(&url).await.expect("get file from URL");
+    #[awt]
+    async fn test_get(
+        #[future] mut cache: CacheFixture,
+        #[allow(unused)] test_server: &TestServer,
+    ) {
+        trace!("begin test");
+        let file = cache
+            .client
+            .get(DEFAULT_URL)
+            .await
+            .expect("get file from URL");
         assert_eq!(
             file.status().await.expect("get file status"),
             FileStatus::Ready
         );
-        assert_eq!(file.url(), url);
+        assert_eq!(file.url(), DEFAULT_URL);
         let content = fs::read_to_string(file.cache_path())
             .await
             .expect("read downloaded file");
-        assert_eq!(content, "This is test file.");
+        assert_eq!(content, DEFAULT_CONTENT);
+        let entry = api::get_entry(&mut cache.db.conn, file.id).await.unwrap();
+        assert_eq!(entry.ref_count, 1);
+        file.release().await.unwrap();
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_get_not_re_downloading() {
-        let mut fixture = ClientFixture::new().await.unwrap();
-        let client = &mut fixture.client;
-
-        let url = format!("{}/file.txt", &fixture.host);
-        let first_file = client
-            .get(&url)
+    #[awt]
+    async fn test_get_not_re_downloading(#[future] cache_with_file: CacheWithFileFixture) {
+        trace!("begin test");
+        let (mut cache, entry) = cache_with_file;
+        let file = cache
+            .client
+            .get(DEFAULT_URL)
             .await
-            .expect("get file from URL first time");
-
-        // drop server to ensure next time nothing will be downloaded
-        fixture.drop_web_server();
-        assert!(reqwest::get(&url).await.is_err());
-
-        let client = &mut fixture.client;
-        let second_file = client
-            .get(&url)
+            .expect("get existing file from URL");
+        assert_eq!(file.id, entry.id);
+        let content = fs::read_to_string(file.cache_path())
             .await
-            .expect("get file from URL second time");
-        assert_eq!(first_file.id, second_file.id);
+            .expect("read existing file");
+        assert_eq!(content, DEFAULT_CONTENT);
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_downloading_retry() {
-        let mut fixture = ClientFixture::new().await.unwrap();
-        let url = format!("{}/new_file.txt", &fixture.host);
-        let test_server = fixture.drop_web_server();
+    #[awt]
+    async fn test_downloading_retry(
+        #[future]
+        #[with(RetryPolicy::Fixed { number: 3, period: Duration::from_secs(1) })]
+        cache: CacheFixture,
+        test_server: &TestServer,
+    ) {
+        trace!("begin test");
+        let url = format!("http://localhost:{}/new_file.txt", test_server.port());
 
         // Create resource after 2500 millisecs
         // Give client time to fail 2 times before providing resource
@@ -704,7 +766,7 @@ mod tests {
         };
 
         let get_resource = async || {
-            let mut client = fixture.client;
+            let mut client = cache.client;
             let file = client
                 .get(&url)
                 .await
@@ -728,130 +790,114 @@ mod tests {
         )));
     }
 
+    #[rstest]
+    #[case::unused_file(0)]
+    #[should_panic(expected = "remove URL from cache: DatabaseError(RemoveError(UsedFile))")]
+    #[case::used_file(1)]
     #[tokio::test]
     #[traced_test]
-    async fn test_remove() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        let file = client.get(&url).await.expect("get file from URL");
-        file.release().await.expect("release file");
-        client.remove(&url).await.expect("remove URL from cache");
-    }
-
-    #[tokio::test]
-    #[traced_test]
-    async fn test_remove_failure() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        let file = client.get(&url).await.expect("get file from URL");
-        let result = client.remove(&url).await;
-        assert!(matches!(
-            result,
-            Err(Error::DatabaseError(DatabaseError::RemoveError(
-                RemoveErrorReason::UsedFile
-            )))
-        ));
-        file.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    #[traced_test]
-    async fn test_set_expires() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        client.get(&url).await.unwrap();
+    #[awt]
+    async fn test_remove(
+        #[allow(unused)]
+        #[case]
+        ref_count: i32,
+        #[future]
+        #[with(DEFAULT_URL, FileStatus::Ready, None, ref_count)]
+        cache_with_file: CacheWithFileFixture,
+    ) {
+        trace!("begin test");
+        let (cache, _) = cache_with_file;
+        let mut client = cache.client;
         client
-            .set_expires(&url, DateTime::<Utc>::MAX_UTC)
+            .remove(DEFAULT_URL)
+            .await
+            .expect("remove URL from cache");
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[traced_test]
+    #[awt]
+    async fn test_set_expires(#[future] cache_with_file: CacheWithFileFixture) {
+        trace!("begin test");
+        let (mut cache, entry) = cache_with_file;
+        let mut client = cache.client;
+        client
+            .set_expires(DEFAULT_URL, DateTime::<Utc>::MAX_UTC)
             .await
             .expect("set expiration timestamp");
-        let file = client.get(&url).await.unwrap();
-        let expires_at = file.expires().await.expect("get expiration timestamp");
-        assert_eq!(expires_at, Some(DateTime::<Utc>::MAX_UTC));
+        let updated_entry = api::get_entry(&mut cache.db.conn, entry.id).await.unwrap();
+        assert_eq!(updated_entry.expires, Some(DateTime::<Utc>::MAX_UTC));
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_schedule_for_removal() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        client.get(&url).await.unwrap();
+    #[awt]
+    async fn test_schedule_for_removal(#[future] cache_with_file: CacheWithFileFixture) {
+        trace!("begin test");
+        let (mut cache, entry) = cache_with_file;
+        let mut client = cache.client;
         client
-            .schedule_for_removal(&url)
+            .schedule_for_removal(DEFAULT_URL)
             .await
             .expect("schedule URL for removal");
-        let file = client.get(&url).await.unwrap();
-        let status = file.status().await.expect("get file status");
-        assert_eq!(status, FileStatus::ToRemove);
+        let updated_entry = api::get_entry(&mut cache.db.conn, entry.id).await.unwrap();
+        assert_eq!(updated_entry.status, FileStatus::ToRemove);
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_update() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        let old_file = client.get(&url).await.unwrap();
-        let old_timestamp = *old_file.created();
-        // release file to allow updating it
-        old_file.release().await.unwrap();
-
-        let new_file = client.update(&url).await.expect("update cache entry");
-        let new_timestamp = new_file.created();
-        assert!(new_timestamp > &old_timestamp);
+    #[awt]
+    async fn test_update(
+        #[future] cache_with_file: CacheWithFileFixture,
+        #[allow(unused)] test_server: &TestServer,
+    ) {
+        trace!("begin test");
+        let (mut cache, entry) = cache_with_file;
+        let mut client = cache.client;
+        client
+            .update(&DEFAULT_URL)
+            .await
+            .expect("update cache entry");
+        let updated_entry = api::get_entry(&mut cache.db.conn, entry.id).await.unwrap();
+        assert!(updated_entry.created > entry.created);
     }
 
+    #[rstest]
+    #[case::wait_enough_time(Duration::from_secs(5))]
+    #[should_panic(expected = "wait for URL released: TimeoutExceeded")]
+    #[case::wait_not_enough_time(Duration::from_secs(1))]
     #[tokio::test]
     #[traced_test]
-    async fn test_wait_url_released() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        let file = client.get(&url).await.expect("get file from URL");
+    #[awt]
+    async fn test_wait_url_released(
+        #[with(DEFAULT_URL, FileStatus::Ready, None, 1)]
+        #[future]
+        cache_with_file: CacheWithFileFixture,
+        #[case] wait_time: Duration,
+    ) {
+        trace!("begin test");
+        let (mut cache, entry) = cache_with_file;
+        let mut client = cache.client;
 
-        // Release file after 1 second
-        let release_file = async || {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            file.release().await.unwrap();
+        // Release file after 3 seconds
+        let mut release_file = async || {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            api::decrement_ref(&mut cache.db.conn, entry.id)
+                .await
+                .unwrap();
         };
 
         // Wait 5 seconds for URL to become free
         let mut wait_for_url_released = async || {
             client
-                .wait_url_released(&url, Duration::from_secs(5))
+                .wait_url_released(DEFAULT_URL, wait_time)
                 .await
                 .expect("wait for URL released");
         };
 
         tokio::join!(release_file(), wait_for_url_released());
     }
-
-    #[tokio::test]
-    #[traced_test]
-    async fn test_wait_url_released_failure() {
-        let fixture = ClientFixture::new().await.unwrap();
-        let mut client = fixture.client;
-        let url = format!("{}/file.txt", &fixture.host);
-        let file = client.get(&url).await.expect("get file from URL");
-
-        // Release file after 2 second
-        let release_file = async move || {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            file.release().await.unwrap();
-        };
-
-        // Wait 1 seconds for URL to become free (should fail)
-        let mut wait_for_url_released = async || {
-            let result = client.wait_url_released(&url, Duration::from_secs(1)).await;
-            assert!(matches!(dbg!(result), Err(Error::TimeoutExceeded)));
-        };
-
-        tokio::join!(release_file(), wait_for_url_released());
-    }
-
-    // TODO: tests granularity:
-    //       don't mix up methods in tests, prepare proper cache state manually instead
 }

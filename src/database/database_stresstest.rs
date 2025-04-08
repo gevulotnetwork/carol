@@ -7,7 +7,6 @@ use crate::database::{self, api, Connection};
 use crate::errors::DatabaseError;
 use crate::FileStatus;
 use std::sync::Arc;
-use tempdir::TempDir;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tracing_test::traced_test;
@@ -26,7 +25,7 @@ async fn test_cache_database_stress_testing() {
     const COUNT: usize = 3000;
 
     // testing on new empty database
-    let tmp = TempDir::new("carol.test").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("carol.sqlite");
 
     database::run_migrations(db_path.as_os_str().to_str().unwrap())

@@ -135,12 +135,11 @@ pub async fn run_migrations(database_url: &str) -> DatabaseResult<()> {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::models::{CacheEntry, NewCacheEntry};
-    use super::*;
-    use crate::errors::NonUtf8PathError;
+    use super::{api, establish_connection, run_migrations, Connection};
     use crate::{DateTime, FileStatus, Utc};
-    use tempdir::TempDir;
-
-    type Error = Box<dyn std::error::Error>;
+    use rstest::fixture;
+    use tempfile::TempDir;
+    use tracing::trace;
 
     /// Fixture which creates new database as temp file.
     /// Removes database on drop.
@@ -153,7 +152,7 @@ pub(crate) mod fixtures {
         pub db_path: String,
 
         /// Database connection.
-        pub db: Connection,
+        pub conn: Connection,
     }
 
     impl CacheDatabaseFixture {
@@ -169,61 +168,64 @@ pub(crate) mod fixtures {
             }
         }
 
-        /// Just an example entry of database which will be created from [`Self::default_new_entry`].
-        pub fn default_entry() -> CacheEntry {
-            CacheEntry {
-                id: 1,
-                url: "http://localhost".to_string(),
-                cache_path: "/var/cache/file".to_string(),
-                created: DateTime::<Utc>::MIN_UTC,
-                expires: None,
-                status: FileStatus::Pending,
-                ref_count: 0,
+        /// Create new empty temp database.
+        pub async fn new() -> Self {
+            trace!("creating CacheDatabaseFixture");
+            let tmp = tempfile::tempdir().unwrap();
+            let db_path = tmp.path().join("carol.sqlite");
+            let db_path = db_path.to_str().unwrap().to_string();
+            run_migrations(&db_path).await.unwrap();
+            let db = establish_connection(&db_path).await.unwrap();
+            Self {
+                tmp,
+                db_path,
+                conn: db,
             }
         }
 
-        /// Create new empty temp database.
-        pub async fn new() -> Result<Self, Error> {
-            let tmp = TempDir::new("carol.test.database")?;
-            let db_path = tmp.path().join("carol.sqlite");
-            let db_path = db_path
-                .as_os_str()
-                .to_str()
-                .ok_or(NonUtf8PathError)?
-                .to_string();
-            run_migrations(&db_path).await?;
-            let db = establish_connection(&db_path).await?;
-            Ok(Self { tmp, db_path, db })
+        /// Insert new entry into current database fixture.
+        pub async fn insert_entry(&mut self, new_entry: NewCacheEntry) -> CacheEntry {
+            trace!(
+                "inserting entry into CacheDatabaseFixture: {:?}",
+                &new_entry
+            );
+            let entry = unsafe { api::insert_unsafe(&mut self.conn, new_entry).await.unwrap() };
+            trace!("CacheDatabaseFixture now contains: {:?}", &entry);
+            entry
         }
+    }
 
-        /// Create new temp database with given entry.
-        /// Returns also primary key of that entry.
-        pub async fn new_with_entry(entry: NewCacheEntry) -> Result<(Self, i32), Error> {
-            let mut fixture = Self::new().await?;
-            let pk = unsafe { api::insert_unsafe(&mut fixture.db, entry).await? }.id;
-            Ok((fixture, pk))
-        }
+    // TODO: use in-memory database for fixture
 
-        /// Create new temp database with default entry (from [`Self::default_entry`]).
-        /// Returns also primary key of that entry.
-        pub async fn new_with_default_entry() -> Result<(Self, i32), Error> {
-            Self::new_with_entry(Self::default_new_entry()).await
-        }
+    /// Create new empty database.
+    #[fixture]
+    pub(crate) async fn database() -> CacheDatabaseFixture {
+        CacheDatabaseFixture::new().await
+    }
+
+    /// Create new database with a single entry.
+    #[fixture]
+    pub(crate) async fn database_with_single_entry(
+        #[default(CacheDatabaseFixture::default_new_entry())] new_entry: NewCacheEntry,
+    ) -> (CacheDatabaseFixture, CacheEntry) {
+        let mut database = database().await;
+        let entry = database.insert_entry(new_entry).await;
+        (database, entry)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::CacheDatabaseFixture;
-    use super::*;
+    use super::establish_connection;
+    use super::fixtures::{database, CacheDatabaseFixture};
     use crate::errors::NonUtf8PathError;
-    use tempdir::TempDir;
+    use rstest::rstest;
     use tracing_test::traced_test;
 
     #[tokio::test]
     #[traced_test]
     async fn test_create_new_database() {
-        let tmp = TempDir::new("carol.test").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("carol.sqlite");
         let db_path_str = db_path
             .as_os_str()
@@ -236,12 +238,12 @@ mod tests {
             .expect("create new database");
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_connect_to_existing_database() {
-        let db = CacheDatabaseFixture::new().await.unwrap();
-
-        establish_connection(&db.db_path)
+    #[awt]
+    async fn test_connect_to_existing_database(#[future] database: CacheDatabaseFixture) {
+        establish_connection(&database.db_path)
             .await
             .expect("connect to existing database");
     }

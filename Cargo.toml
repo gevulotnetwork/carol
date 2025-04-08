@@ -33,6 +33,7 @@ diesel-async = { version = "0.5", features = [
     "deadpool",
 ] }
 diesel_migrations = "2"
+eyre = "0.6"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream"] }
 thiserror = "2"
@@ -45,8 +46,9 @@ sha256 = "1.5"
 [dev-dependencies]
 http-test-server = "2"
 rand = "0.9"
+rstest = "0.25"
 serde = { version = "1", features = ["derive"] }
-tempdir = "0.3"
+tempfile = "3"
 tokio-cron-scheduler = { version = "0.13", features = ["signal"] }
 tokio-test = "0.4"
 tracing-test = "0.2"

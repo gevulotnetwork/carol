@@ -292,19 +292,24 @@ pub async fn update_expires(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::fixtures::CacheDatabaseFixture;
+    use crate::database::fixtures::{database, database_with_single_entry, CacheDatabaseFixture};
     use crate::errors::DieselError;
+    use rstest::rstest;
     use tracing_test::traced_test;
 
+    #[rstest(database as db_fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_new_entry() {
-        let db_fixture = CacheDatabaseFixture::new().await.unwrap();
-        let mut db = db_fixture.db;
-
-        let entry = new_entry(&mut db, "http://localhost", "/var/cache/file", None)
-            .await
-            .expect("add new entry");
+    #[awt]
+    async fn test_new_entry(#[future] mut db_fixture: CacheDatabaseFixture) {
+        let entry = new_entry(
+            &mut db_fixture.conn,
+            "http://localhost",
+            "/var/cache/file",
+            None,
+        )
+        .await
+        .expect("add new entry");
         assert_eq!(entry.url, "http://localhost".to_string());
         assert_eq!(entry.status, FileStatus::Pending);
         assert_eq!(entry.cache_path, "/var/cache/file".to_string());
@@ -312,119 +317,116 @@ mod tests {
         assert_eq!(entry.ref_count, 0);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_get_entry() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
+    #[awt]
+    async fn test_get_entry(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        let entry = get_entry(&mut db_fixture.conn, inserted_entry.id)
             .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        let entry = get_entry(&mut db, pk).await.expect("get entry");
-        assert_eq!(entry, CacheDatabaseFixture::default_entry());
+            .expect("get entry");
+        assert_eq!(entry, inserted_entry);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_get_entry_by_url() {
-        let (db_fixture, _) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        let entry = get_by_url(&mut db, "http://localhost")
+    #[awt]
+    async fn test_get_entry_by_url(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        let entry = get_by_url(&mut db_fixture.conn, "http://localhost")
             .await
             .expect("get entry by url")
             .expect("get some entry by url");
-        assert_eq!(entry, CacheDatabaseFixture::default_entry());
+        assert_eq!(entry, inserted_entry);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_get_entry_by_cache_path() {
-        let (db_fixture, _) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        let entry = get_by_cache_path(&mut db, "/var/cache/file")
+    #[awt]
+    async fn test_get_entry_by_cache_path(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        let entry = get_by_cache_path(&mut db_fixture.conn, "/var/cache/file")
             .await
             .expect("get entry")
             .expect("get some entry by cache path");
-        assert_eq!(entry, CacheDatabaseFixture::default_entry());
+        assert_eq!(entry, inserted_entry);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_get_all() {
-        let (db_fixture, _) = CacheDatabaseFixture::new_with_default_entry()
+    #[awt]
+    async fn test_get_all(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        let all = get_all(&mut db_fixture.conn)
             .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        let all = get_all(&mut db).await.expect("get all entries");
-        assert_eq!(all.len(), 1);
-        let entry = &all[0];
-        assert_eq!(entry, &CacheDatabaseFixture::default_entry());
+            .expect("get all entries");
+        assert_eq!(all, vec![inserted_entry]);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_filter_by_status() {
-        let (db_fixture, _) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        let all = filter_by_status(&mut db, FileStatus::Pending)
+    #[awt]
+    async fn test_filter_by_status(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        let all = filter_by_status(&mut db_fixture.conn, FileStatus::Pending)
             .await
             .expect("get all pending entries");
-        assert_eq!(all.len(), 1);
-        let entry = &all[0];
-        assert_eq!(entry, &CacheDatabaseFixture::default_entry());
+        assert_eq!(all, vec![inserted_entry]);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_update_expires() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
+    #[awt]
+    async fn test_update_expires(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        update_expires(
+            &mut db_fixture.conn,
+            inserted_entry.id,
+            Some(DateTime::<Utc>::MAX_UTC),
+        )
+        .await
+        .expect("update expiration timestamp");
+        let entry = get_entry(&mut db_fixture.conn, inserted_entry.id)
             .await
             .unwrap();
-        let mut db = db_fixture.db;
-
-        update_expires(&mut db, pk, Some(DateTime::<Utc>::MAX_UTC))
-            .await
-            .expect("update expiration timestamp");
-
-        let entry = get_entry(&mut db, pk).await.unwrap();
         assert_eq!(entry.expires, Some(DateTime::<Utc>::MAX_UTC));
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_update_status() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        update_status(&mut db, pk, FileStatus::Ready)
+    #[awt]
+    async fn test_update_status(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        update_status(&mut db_fixture.conn, inserted_entry.id, FileStatus::Ready)
             .await
             .expect("update file status");
-
-        let entry = get_entry(&mut db, pk).await.unwrap();
+        let entry = get_entry(&mut db_fixture.conn, inserted_entry.id)
+            .await
+            .unwrap();
         assert_eq!(entry.status, FileStatus::Ready);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_new_entry_failure() {
-        let (db_fixture, _) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
+    #[awt]
+    async fn test_new_entry_failure(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, _) = fixture;
 
-        let result = new_entry(&mut db, "http://localhost", "/var/cache/file2", None).await;
+        let result = new_entry(
+            &mut db_fixture.conn,
+            "http://localhost",
+            "/var/cache/file2",
+            None,
+        )
+        .await;
 
         assert!(
             result
@@ -434,7 +436,7 @@ mod tests {
         );
 
         let result = new_entry(
-            &mut db,
+            &mut db_fixture.conn,
             "http://localhost/new_path",
             "/var/cache/file",
             None,
@@ -449,107 +451,127 @@ mod tests {
         );
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_increment_decrement_ref() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        increment_ref(&mut db, pk)
+    #[awt]
+    async fn test_increment_ref(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        increment_ref(&mut db_fixture.conn, inserted_entry.id)
             .await
             .expect("increment reference counter of file");
-
-        let entry = get_entry(&mut db, pk).await.unwrap();
+        let entry = get_entry(&mut db_fixture.conn, inserted_entry.id)
+            .await
+            .unwrap();
         assert_eq!(entry.ref_count, 1);
+    }
 
-        decrement_ref(&mut db, pk)
+    #[rstest]
+    #[tokio::test]
+    #[traced_test]
+    #[awt]
+    async fn test_decrement_ref(
+        #[future]
+        #[from(database_with_single_entry)]
+        #[with(NewCacheEntry {
+            ref_count: 1,
+            ..CacheDatabaseFixture::default_new_entry()
+        })]
+        fixture: (CacheDatabaseFixture, CacheEntry),
+    ) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        decrement_ref(&mut db_fixture.conn, inserted_entry.id)
             .await
             .expect("decrement reference counter of file");
-
-        let entry = get_entry(&mut db, pk).await.unwrap();
+        let entry = get_entry(&mut db_fixture.conn, inserted_entry.id)
+            .await
+            .unwrap();
         assert_eq!(entry.ref_count, 0);
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_remove_not_scheduled_entry_fails() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        let result = remove_entry(&mut db, pk).await;
+    #[awt]
+    async fn test_remove_not_scheduled_entry_fails(
+        #[future] fixture: (CacheDatabaseFixture, CacheEntry),
+    ) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        let result = remove_entry(&mut db_fixture.conn, inserted_entry.id).await;
         assert!(matches!(
             result,
             Err(DatabaseError::RemoveError(RemoveErrorReason::WrongStatus))
         ));
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_remove_used_entry_fails() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        increment_ref(&mut db, pk).await.unwrap();
-
-        let result = remove_entry(&mut db, pk).await;
+    #[awt]
+    async fn test_remove_used_entry_fails(
+        #[future]
+        #[from(database_with_single_entry)]
+        #[with(NewCacheEntry {
+            ref_count: 1,
+            ..CacheDatabaseFixture::default_new_entry()
+        })]
+        fixture: (CacheDatabaseFixture, CacheEntry),
+    ) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        let result = remove_entry(&mut db_fixture.conn, inserted_entry.id).await;
         assert!(matches!(
             result,
             Err(DatabaseError::RemoveError(RemoveErrorReason::UsedFile))
         ));
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_delete_unsafe() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        unsafe { delete_unsafe(&mut db, pk) }
+    #[awt]
+    async fn test_delete_unsafe(#[future] fixture: (CacheDatabaseFixture, CacheEntry)) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        unsafe { delete_unsafe(&mut db_fixture.conn, inserted_entry.id) }
             .await
             .expect("remove entry unsafely");
-
-        let all = get_all(&mut db).await.unwrap();
+        let all = get_all(&mut db_fixture.conn).await.unwrap();
         assert!(all.is_empty());
     }
 
+    #[rstest(database_with_single_entry as fixture)]
     #[tokio::test]
     #[traced_test]
-    async fn test_remove_non_existing_entry_fails() {
-        let (db_fixture, _) = CacheDatabaseFixture::new_with_default_entry()
-            .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
+    #[awt]
+    async fn test_remove_non_existing_entry_fails(
+        #[future] fixture: (CacheDatabaseFixture, CacheEntry),
+    ) {
+        let (mut db_fixture, _) = fixture;
         let invalid_pk = 123i32;
-        let result = remove_entry(&mut db, invalid_pk).await;
+        let result = remove_entry(&mut db_fixture.conn, invalid_pk).await;
         assert!(matches!(
             result,
             Err(DatabaseError::DieselError(DieselError::NotFound))
         ));
     }
 
+    #[rstest]
     #[tokio::test]
     #[traced_test]
-    async fn test_remove_entry() {
-        let (db_fixture, pk) = CacheDatabaseFixture::new_with_default_entry()
+    #[awt]
+    async fn test_remove_entry(
+        #[future]
+        #[from(database_with_single_entry)]
+        #[with(NewCacheEntry {
+            status: FileStatus::ToRemove,
+            ..CacheDatabaseFixture::default_new_entry()
+        })]
+        fixture: (CacheDatabaseFixture, CacheEntry),
+    ) {
+        let (mut db_fixture, inserted_entry) = fixture;
+        remove_entry(&mut db_fixture.conn, inserted_entry.id)
             .await
-            .unwrap();
-        let mut db = db_fixture.db;
-
-        update_status(&mut db, pk, FileStatus::ToRemove)
-            .await
-            .unwrap();
-
-        remove_entry(&mut db, pk).await.expect("remove entry");
-        let all = get_all(&mut db).await.unwrap();
+            .expect("remove entry");
+        let all = get_all(&mut db_fixture.conn).await.unwrap();
         assert!(all.is_empty());
     }
 }
