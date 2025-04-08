@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+permissions:
+  pull-requests: write
+
 jobs:
   collect:
     name: Collect
@@ -31,6 +34,7 @@ jobs:
           thresholds: "50 75"
           fail_below_min: true
           format: markdown
+          hide_complexity: true
           output: both
           badge: true
 
