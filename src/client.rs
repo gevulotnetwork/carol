@@ -518,6 +518,7 @@ impl fmt::Debug for Client {
 
 /// Client fixtures. Helps in testing client-related code.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) mod fixtures {
     use super::ReqwestClient;
     use crate::database::fixtures::{database, CacheDatabaseFixture};
