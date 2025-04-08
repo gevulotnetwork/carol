@@ -21,6 +21,7 @@ pub mod schema;
 
 #[cfg(feature = "stresstest")]
 #[cfg(test)]
+#[cfg(not(tarpaulin))]
 mod database_stresstest;
 
 /// Inner SQLite connection type.
