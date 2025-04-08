@@ -83,75 +83,79 @@ impl<'c> CacheCleaner<'c> {
 // TODO: Garbage collector may run a pool of clients to perform removals asynchronously.
 //       For now files are removed sequentially, because &mut Client cannot be shared.
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::client::fixtures::ClientFixture;
-//     use crate::{DateTime, Utc};
-//     use tracing_test::traced_test;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::fixtures::{cache_with_file, CacheWithFileFixture, DEFAULT_URL};
+    use crate::database::api;
+    use crate::{DateTime, Utc};
+    use rstest::rstest;
+    use tracing_test::traced_test;
+    use tracing::trace;
 
-//     #[tokio::test]
-//     #[traced_test]
-//     async fn test_schedule_for_removal() {
-//         let fixture = ClientFixture::new().await.unwrap();
-//         let mut client = fixture.client;
+    #[rstest]
+    #[tokio::test]
+    #[traced_test]
+    #[awt]
+    async fn test_schedule_for_removal(
+        #[future]
+        #[with(DEFAULT_URL, FileStatus::Ready, Some(DateTime::<Utc>::MIN_UTC))]
+        cache_with_file: CacheWithFileFixture,
+    ) {
+        trace!("begin test");
+        let (mut cache, entry) = cache_with_file;
+        let mut client = cache.client;
 
-//         let url = format!("{}/file.txt", &fixture.host);
-//         client.get(&url).await.unwrap();
-//         client
-//             .set_expires(&url, DateTime::<Utc>::MIN_UTC)
-//             .await
-//             .unwrap();
+        let mut cleaner = CacheCleaner::new(&mut client);
+        cleaner
+            .schedule_for_removal()
+            .await
+            .expect("schedule for removal all expired files");
 
-//         let mut cleaner = CacheCleaner::new(&mut client);
-//         cleaner
-//             .schedule_for_removal()
-//             .await
-//             .expect("schedule for removal");
+        let entry = api::get_entry(&mut cache.db.conn, entry.id).await.unwrap();
+        assert_eq!(entry.status, FileStatus::ToRemove);
+    }
 
-//         let status = client.get(&url).await.unwrap().status().await.unwrap();
-//         assert_eq!(status, FileStatus::ToRemove);
-//     }
+    #[rstest]
+    #[tokio::test]
+    #[traced_test]
+    #[awt]
+    async fn test_remove(
+        #[future]
+        #[with(DEFAULT_URL, FileStatus::ToRemove)]
+        cache_with_file: CacheWithFileFixture,
+    ) {
+        trace!("begin test");
+        let (mut cache, _) = cache_with_file;
+        let mut client = cache.client;
 
-//     #[tokio::test]
-//     #[traced_test]
-//     async fn test_remove() {
-//         let fixture = ClientFixture::new().await.unwrap();
-//         let mut client = fixture.client;
+        let mut cleaner = CacheCleaner::new(&mut client);
+        cleaner
+            .remove()
+            .await
+            .expect("remove files with 'ToRemove' status");
 
-//         let url = format!("{}/file.txt", &fixture.host);
-//         let file = client.get(&url).await.unwrap();
-//         file.release().await.unwrap();
-//         client.schedule_for_removal(&url).await.unwrap();
+        let entries = api::get_all(&mut cache.db.conn).await.unwrap();
+        assert!(entries.is_empty());
+    }
 
-//         let mut cleaner = CacheCleaner::new(&mut client);
-//         cleaner
-//             .remove()
-//             .await
-//             .expect("remove files with 'ToRemove' status");
+    #[rstest]
+    #[tokio::test]
+    #[traced_test]
+    #[awt]
+    async fn test_run_once(
+        #[future]
+        #[with(DEFAULT_URL, FileStatus::Ready, Some(DateTime::<Utc>::MIN_UTC))]
+        cache_with_file: CacheWithFileFixture,
+    ) {
+        trace!("begin test");
+        let (mut cache, _) = cache_with_file;
+        let mut client = cache.client;
 
-//         let maybe_file = client.find(&url).await.unwrap();
-//         assert!(maybe_file.is_none());
-//     }
+        let mut cleaner = CacheCleaner::new(&mut client);
+        cleaner.run_once().await.expect("run cache cleaner");
 
-//     #[tokio::test]
-//     #[traced_test]
-//     async fn test_run_once() {
-//         let fixture = ClientFixture::new().await.unwrap();
-//         let mut client = fixture.client;
-
-//         let url = format!("{}/file.txt", &fixture.host);
-//         let file = client.get(&url).await.unwrap();
-//         file.release().await.unwrap();
-//         client
-//             .set_expires(&url, DateTime::<Utc>::MIN_UTC)
-//             .await
-//             .unwrap();
-
-//         let mut cleaner = CacheCleaner::new(&mut client);
-//         cleaner.run_once().await.expect("run cache cleaner");
-
-//         let maybe_file = client.find(&url).await.unwrap();
-//         assert!(maybe_file.is_none());
-//     }
-// }
+        let entries = api::get_all(&mut cache.db.conn).await.unwrap();
+        assert!(entries.is_empty());
+    }
+}
