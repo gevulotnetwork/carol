@@ -90,8 +90,8 @@ mod tests {
     use crate::database::api;
     use crate::{DateTime, Utc};
     use rstest::rstest;
-    use tracing_test::traced_test;
     use tracing::trace;
+    use tracing_test::traced_test;
 
     #[rstest]
     #[tokio::test]
