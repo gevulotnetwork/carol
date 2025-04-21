@@ -40,7 +40,7 @@ jobs:
       - name: Use Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Run linting
-        run: cargo clippy --locked --no-deps --all-targets -- --deny warnings
+        run: cargo clippy --no-deps --all-targets -- --deny warnings
 
   check-build:
     name: Check build
@@ -58,7 +58,7 @@ jobs:
       - name: Run build check
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo check --locked
+        run: cargo check
 
   build-docs:
     name: Build docs
@@ -97,4 +97,4 @@ jobs:
       - name: Run tests
         env:
           RUST_TEST_TIME_UNIT: "10000,60000"
-        run: cargo +nightly test --locked -- -Z unstable-options --ensure-time
+        run: cargo +nightly test -- -Z unstable-options --ensure-time
