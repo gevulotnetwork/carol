@@ -83,7 +83,6 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         match self.db.store(metadata).await {
             Ok(id) => {
                 let mut run = async || -> Result<File, StorageError<D::Error>> {
-                    // TODO: catch "no space left" error and evict something from storage
                     let mut output = fs::File::create_new(&path).await?;
                     while let Some(chunk_result) = stream.next().await {
                         let chunk = chunk_result.map_err(StorageError::custom)?;
@@ -108,6 +107,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                 }
             }
             Err(err) if err.is_unique_violation() => {
+                // FIXME: looping is probably not the best approach
                 let file = loop {
                     match self.find_by_source(&source).await? {
                         Some(file) if file.status == FileStatus::Ready => {
@@ -117,14 +117,14 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                             time::sleep(Duration::from_secs(1)).await;
                         }
                         _ => {
-                            panic!("await error");
+                            return Err(StorageError::AwaitingError);
                         }
                     }
                 };
                 // TODO: check that file is not stale
                 Ok(file)
             }
-            Err(err) => panic!("{:?}", err),
+            Err(err) => Err(err.into()),
         }
     }
 
