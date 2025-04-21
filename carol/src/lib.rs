@@ -60,7 +60,10 @@ pub mod sqlite;
 // Public re-exports
 pub use database::{StorageDatabase, StorageDatabaseError, StorageDatabaseExt};
 pub use error::{NonUtf8PathError, StorageError};
-pub use file::{File, FileId, FileMetadata, FileSource, FileStatus, StorePolicy};
+pub use file::{
+    File, FileId, FileLock, FileLockError, FileLockMode, FileMetadata, FileSource, FileStatus,
+    StorePolicy,
+};
 pub use storage_config::{EvictionPolicy, StorageConfig};
 pub use storage_manager::StorageManager;
 

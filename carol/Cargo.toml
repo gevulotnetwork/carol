@@ -8,6 +8,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+advisory-lock = "0.3.0"
 async-trait = "0.1.88"
 bytes = "1.10.1"
 chrono = { version = "0.4.40", features = ["serde"] }
