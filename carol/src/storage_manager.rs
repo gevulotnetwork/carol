@@ -187,8 +187,13 @@ impl StorageManager {
         if !dir.as_ref().is_absolute() {
             return Err(StorageError::StorageDirectoryPathIsNotAbsolute);
         }
-        if !dir.as_ref().is_dir() {
-            return Err(StorageError::StorageDirectoryDoesNotExist);
+        let metadata = fs::metadata(dir.as_ref()).await?;
+        if !metadata.is_dir() {
+            return Err(IoError::new(
+                IoErrorKind::NotADirectory,
+                "storage path is not a directory",
+            )
+            .into());
         }
         let dir = dir.as_ref().to_path_buf();
         run_migrations(database_url.as_ref()).await?;
