@@ -21,6 +21,19 @@ use crate::sqlite::{self, run_migrations, SqliteStorageDatabase};
 use crate::storage_config::StorageConfig;
 
 /// Storage manager. This is an adapter to interact with Carol storage.
+///
+/// To all the methods which add new file to a storage like:
+///
+/// - [`add_file`][Self::add_file]
+/// - [`add_file_from_stream`][Self::add_file_from_stream]
+/// - [`copy_local_file`][Self::copy_local_file]
+/// - [`move_local_file`][Self::move_local_file]
+///
+/// the following applies:
+///
+/// - "create" and "last used" timestamps of the file will be set to `Utc::now()`
+/// - path to file inside the storage is defined by [`path_from_source`][Self::path_from_source]
+///   method
 #[derive(Clone, Debug)]
 pub struct StorageManager<D: StorageDatabase = SqliteStorageDatabase> {
     db: D,
@@ -45,9 +58,6 @@ impl<D: StorageDatabase> StorageManager<D> {
 
 impl<D: StorageDatabaseExt> StorageManager<D> {
     /// Add new file to storage. Content of the file is read from `stream`.
-    ///
-    /// "Create" and "last used" timestamps of the file will be set to `Utc::now()`.
-    /// File path is defined by [`Self::path_from_source`].
     pub async fn add_file_from_stream<S, E>(
         &self,
         source: FileSource,
@@ -120,11 +130,8 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
 
     /// Add new file to storage by **copying** it from local path.
     ///
-    /// "Create" and "last used" timestamps of the file will be set to `Utc::now()`.
-    /// File path is defined by [`Self::path_from_source`].
-    ///
-    /// **Note:** if you are using local path as `source`, keep in mind that sources are unique in
-    /// the storage. Because of that the same call for a modified local file **will not update** the
+    /// If you are using local path as `source`, keep in mind that sources are unique in the
+    /// storage. Because of that the same call for a modified local file **will not update** the
     /// file in the storage.
     pub async fn copy_local_file(
         &self,
@@ -142,11 +149,8 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
 
     /// Move local file into the storage. This will remove the source file.
     ///
-    /// "Create" and "last used" timestamps of the file will be set to `Utc::now()`.
-    /// File path is defined by [`Self::path_from_source`].
-    ///
-    /// **Note:** in case that storage and local file are on a different devices, file will be
-    /// copied with [`Self::copy_local_file`]. In that case there is a chance that the file will be
+    /// If the storage directory and a local file are on a different devices, file will be copied
+    /// with [`Self::copy_local_file`]. In that case there is a chance that the file will be
     /// succesfully copied into the storage, but won't be removed from source path due to some
     /// error. If one knows that storage is located on a different device, then it is recommended
     /// to use [`Self::copy_local_file`] directly instead.
@@ -200,9 +204,6 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
     }
 
     /// Add new file to storage with given content.
-    ///
-    /// "Create" and "last used" timestamps of the file will be set to `Utc::now()`.
-    /// File path is defined by [`Self::path_from_source`].
     pub async fn add_file(
         &self,
         source: FileSource,
