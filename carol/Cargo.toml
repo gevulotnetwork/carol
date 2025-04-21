@@ -29,6 +29,7 @@ tracing = "0.1.41"
 url = { version = "2.5.4", features = ["serde"] }
 
 [dev-dependencies]
+anyhow = "1.0.98"
 mockall = "0.13.1"
 rstest = "0.25.0"
 tempfile = "3.19.1"

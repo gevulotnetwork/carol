@@ -70,6 +70,8 @@ pub use storage_manager::StorageManager;
 
 // Re-exports of extern crates containing types referenced in public API
 #[doc(no_inline)]
+pub use bytes;
+#[doc(no_inline)]
 pub use chrono;
 #[doc(no_inline)]
 pub use url;

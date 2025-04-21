@@ -78,8 +78,14 @@ impl From<Url> for FileSource {
     }
 }
 
+impl From<&str> for FileSource {
+    fn from(input: &str) -> Self {
+        Self::parse(input)
+    }
+}
+
 impl FromStr for FileSource {
-    type Err = ();
+    type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self::parse(s))
