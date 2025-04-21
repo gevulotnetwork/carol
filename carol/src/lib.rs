@@ -49,17 +49,18 @@
 //! ```
 
 mod database;
-mod error;
 mod file;
 mod storage_config;
 mod storage_manager;
 
 // Public modules
+pub mod error;
 pub mod sqlite;
 
 // Public re-exports
 pub use database::{StorageDatabase, StorageDatabaseError, StorageDatabaseExt};
-pub use error::{NonUtf8PathError, StorageError};
+#[doc(inline)]
+pub use error::{Error, ErrorKind};
 pub use file::{
     File, FileId, FileLock, FileLockError, FileLockMode, FileMetadata, FileSource, FileStatus,
     StorePolicy,

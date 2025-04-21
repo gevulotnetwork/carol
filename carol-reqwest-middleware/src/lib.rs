@@ -32,7 +32,7 @@ use content_disposition::parse_content_disposition;
 use http::header::CONTENT_DISPOSITION;
 use http::Extensions;
 use reqwest_middleware::reqwest::{Body, Request, Response, ResponseBuilderExt};
-use reqwest_middleware::{Middleware, Next};
+use reqwest_middleware::{Error as MidError, Middleware, Next};
 use serde::Serialize;
 
 #[doc(no_inline)]
@@ -77,10 +77,10 @@ where
             .storage_manager
             .add_file_from_stream(url.into(), self.store_policy, filename, stream)
             .await
-            .unwrap();
+            .map_err(MidError::middleware)?;
 
-        let body = Body::from(serde_json::to_string(&file).unwrap());
-        let response = Response::from(builder.body(body).unwrap());
+        let body = Body::from(serde_json::to_string(&file).map_err(MidError::middleware)?);
+        let response = Response::from(builder.body(body).map_err(MidError::middleware)?);
         Ok(response)
     }
 }
@@ -101,8 +101,6 @@ fn get_filename(response: &Response) -> Option<String> {
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned)
 }
-
-// FIXME: remove unwrap()
 
 #[cfg(test)]
 mod tests {

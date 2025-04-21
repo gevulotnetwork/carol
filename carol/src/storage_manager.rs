@@ -13,11 +13,11 @@ use tokio::time;
 use tokio_util::codec::{BytesCodec, FramedRead};
 
 use crate::database::{StorageDatabase, StorageDatabaseError, StorageDatabaseExt};
-use crate::error::StorageError;
+use crate::error::{Error, FreeSpaceError, StoragePathError};
 use crate::file::{
     File, FileLockError, FileLockMode, FileMetadata, FileSource, FileStatus, StorePolicy,
 };
-use crate::sqlite::{self, run_migrations, SqliteStorageDatabase};
+use crate::sqlite::{run_migrations, SqliteStorageDatabase};
 use crate::storage_config::StorageConfig;
 
 /// Storage manager. This is an adapter to interact with Carol storage.
@@ -64,7 +64,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         store_policy: StorePolicy,
         filename: Option<String>,
         mut stream: S,
-    ) -> Result<File, StorageError<D::Error>>
+    ) -> Result<File, Error>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin,
         E: StdError + 'static + Send + Sync,
@@ -82,17 +82,17 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
 
         match self.db.store(metadata).await {
             Ok(id) => {
-                let mut run = async || -> Result<File, StorageError<D::Error>> {
+                let mut run = async || -> Result<File, Error> {
                     let mut output = fs::File::create_new(&path).await?;
                     while let Some(chunk_result) = stream.next().await {
-                        let chunk = chunk_result.map_err(StorageError::custom)?;
+                        let chunk = chunk_result.map_err(|err| Error::other(Box::new(err)))?;
                         self.write_chunk(&chunk, &mut output).await?;
                     }
                     let file = self.db.update_status(id, FileStatus::Ready).await?;
                     Ok(file)
                 };
 
-                let revert = async || -> Result<(), StorageError<D::Error>> {
+                let revert = async || -> Result<(), Error> {
                     fs::remove_file(&path).await?;
                     self.db.remove(id).await?;
                     Ok(())
@@ -117,7 +117,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                             time::sleep(Duration::from_secs(1)).await;
                         }
                         _ => {
-                            return Err(StorageError::AwaitingError);
+                            return Err(Error::awaiting());
                         }
                     }
                 };
@@ -139,7 +139,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         store_policy: StorePolicy,
         filename: Option<String>,
         path: impl AsRef<Path>,
-    ) -> Result<File, StorageError<D::Error>> {
+    ) -> Result<File, Error> {
         let file = fs::File::open(path.as_ref()).await?;
         let stream =
             FramedRead::new(file, BytesCodec::new()).map(|item| item.map(BytesMut::freeze));
@@ -160,7 +160,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         store_policy: StorePolicy,
         filename: Option<String>,
         path: impl AsRef<Path>,
-    ) -> Result<File, StorageError<D::Error>> {
+    ) -> Result<File, Error> {
         let source_path = path.as_ref();
         let path = self.path_from_source(&source);
 
@@ -183,12 +183,12 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                     created: now,
                     last_used: now,
                 };
-                let run = async || -> Result<File, StorageError<D::Error>> {
+                let run = async || -> Result<File, Error> {
                     let id = self.db.store(metadata).await?;
                     let file = self.db.update_status(id, FileStatus::Ready).await?;
                     Ok(file)
                 };
-                let revert = async || -> Result<(), StorageError<D::Error>> {
+                let revert = async || -> Result<(), Error> {
                     fs::rename(&path, source_path).await.map_err(Into::into)
                 };
 
@@ -210,17 +210,14 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         store_policy: StorePolicy,
         filename: Option<String>,
         content: Bytes,
-    ) -> Result<File, StorageError<D::Error>> {
+    ) -> Result<File, Error> {
         let stream = tokio_stream::once(Ok::<_, std::convert::Infallible>(content));
         self.add_file_from_stream(source, store_policy, filename, stream)
             .await
     }
 
     /// Find file in storage by its source.
-    pub async fn find_by_source(
-        &self,
-        source: &FileSource,
-    ) -> Result<Option<File>, StorageError<D::Error>> {
+    pub async fn find_by_source(&self, source: &FileSource) -> Result<Option<File>, Error> {
         let files = self.db.select_by_source(source).await?;
         // Because of the way self.path_from_source() works, sources
         // are also expected to be unique.
@@ -249,30 +246,40 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
 
     /// Evicts one file from storage using current eviction policy.
     /// Return `Ok(())` if some file was succesfully evicted and error otherwise.
-    async fn evict_one_file(&self) -> Result<(), StorageError<D::Error>> {
+    async fn evict_one_file(&self) -> Result<(), Error> {
         // TODO: optimize preformance (avoid selecting all files at once)
-        let files = match self.config.eviction_policy {
-            crate::EvictionPolicy::Lru => self.db.order_by_last_used().await?,
-            crate::EvictionPolicy::Fifo => self.db.order_by_created().await?,
-            crate::EvictionPolicy::Random => {
-                let mut files = self.db.select_all().await?;
-                let mut rng = rand::rng();
-                files.shuffle(&mut rng);
-                files
-            }
-        };
-        for file in files {
-            match file.try_lock(FileLockMode::Exclusive) {
-                Ok(_lock) => {
-                    fs::remove_file(&file.metadata.path).await?;
-                    self.db.remove(file.id).await?;
-                    return Ok(());
+        async fn inner<D: StorageDatabaseExt>(this: &StorageManager<D>) -> Result<(), Error> {
+            let files = match this.config.eviction_policy {
+                crate::EvictionPolicy::Lru => this.db.order_by_last_used().await?,
+                crate::EvictionPolicy::Fifo => this.db.order_by_created().await?,
+                crate::EvictionPolicy::Random => {
+                    let mut files = this.db.select_all().await?;
+                    let mut rng = rand::rng();
+                    files.shuffle(&mut rng);
+                    files
                 }
-                Err(FileLockError::AlreadyLocked) => continue,
-                Err(FileLockError::Io(err)) => return Err(err.into()),
+            };
+            for file in files {
+                match file.try_lock(FileLockMode::Exclusive) {
+                    Ok(_lock) => {
+                        fs::remove_file(&file.metadata.path).await?;
+                        this.db.remove(file.id).await?;
+                        return Ok(());
+                    }
+                    Err(FileLockError::AlreadyLocked) => continue,
+                    Err(FileLockError::Io(err)) => return Err(err.into()),
+                }
             }
+            Err(Error::eviction(Box::new(FreeSpaceError)))
         }
-        Err(StorageError::EvictionFailed)
+
+        inner(self).await.map_err(|err| {
+            if err.is_free_space_error() {
+                err
+            } else {
+                Error::eviction(Box::new(err))
+            }
+        })
     }
 }
 
@@ -300,7 +307,7 @@ impl StorageManager {
         database_url: impl AsRef<str>,
         dir: impl AsRef<Path>,
         pool_size: Option<usize>,
-    ) -> Result<Self, StorageError<sqlite::error::DatabaseError>> {
+    ) -> Result<Self, Error> {
         Self::init_with_config(database_url, dir, pool_size, StorageConfig::default()).await
     }
 
@@ -310,9 +317,9 @@ impl StorageManager {
         dir: impl AsRef<Path>,
         pool_size: Option<usize>,
         config: StorageConfig,
-    ) -> Result<Self, StorageError<sqlite::error::DatabaseError>> {
+    ) -> Result<Self, Error> {
         if !dir.as_ref().is_absolute() {
-            return Err(StorageError::StorageDirectoryPathIsNotAbsolute);
+            return Err(Error::init(Box::new(StoragePathError)));
         }
         let metadata = fs::metadata(dir.as_ref()).await?;
         if !metadata.is_dir() {

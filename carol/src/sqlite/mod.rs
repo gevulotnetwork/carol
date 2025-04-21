@@ -1,4 +1,4 @@
-//! Implementation of storage database backed by SQLite.
+//! Storage database backed by SQLite.
 //!
 //! An SQLite database build with migrations from `./migrations`.
 
