@@ -1,10 +1,12 @@
 use std::error::Error as StdError;
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use chrono::Utc;
 use futures_util::{Stream, StreamExt};
+use rand::seq::SliceRandom;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::time;
@@ -12,7 +14,9 @@ use tokio_util::codec::{BytesCodec, FramedRead};
 
 use crate::database::{StorageDatabase, StorageDatabaseError, StorageDatabaseExt};
 use crate::error::StorageError;
-use crate::file::{File, FileMetadata, FileSource, FileStatus, StorePolicy};
+use crate::file::{
+    File, FileLockError, FileLockMode, FileMetadata, FileSource, FileStatus, StorePolicy,
+};
 use crate::sqlite::{self, run_migrations, SqliteStorageDatabase};
 use crate::storage_config::StorageConfig;
 
@@ -73,7 +77,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                     let mut output = fs::File::create_new(&path).await?;
                     while let Some(chunk_result) = stream.next().await {
                         let chunk = chunk_result.map_err(StorageError::custom)?;
-                        output.write_all(&chunk).await?;
+                        self.write_chunk(&chunk, &mut output).await?;
                     }
                     let file = self.db.update_status(id, FileStatus::Ready).await?;
                     Ok(file)
@@ -147,6 +151,53 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         debug_assert!(files.len() <= 1);
         Ok(files.into_iter().next())
     }
+
+    /// Attempts to write chunk of bytes into file. If "no space left" error occurs, tries to evict
+    /// as many files from storage as needed to free enough space.
+    async fn write_chunk(&self, chunk: &Bytes, output: &mut fs::File) -> Result<(), IoError> {
+        match output.write_all(chunk).await {
+            Err(err)
+                if err.kind() == IoErrorKind::StorageFull
+                    || err.kind() == IoErrorKind::QuotaExceeded =>
+            {
+                // If "no space left" occured, evict some file from storage and retry writing
+                if self.evict_one_file().await.is_ok() {
+                    Box::pin(self.write_chunk(chunk, output)).await
+                } else {
+                    Err(err)
+                }
+            }
+            res => res,
+        }
+    }
+
+    /// Evicts one file from storage using current eviction policy.
+    /// Return `Ok(())` if some file was succesfully evicted and error otherwise.
+    async fn evict_one_file(&self) -> Result<(), StorageError<D::Error>> {
+        // TODO: optimize preformance (avoid selecting all files at once)
+        let files = match self.config.eviction_policy {
+            crate::EvictionPolicy::Lru => self.db.order_by_last_used().await?,
+            crate::EvictionPolicy::Fifo => self.db.order_by_created().await?,
+            crate::EvictionPolicy::Random => {
+                let mut files = self.db.select_all().await?;
+                let mut rng = rand::rng();
+                files.shuffle(&mut rng);
+                files
+            }
+        };
+        for file in files {
+            match file.try_lock(FileLockMode::Exclusive) {
+                Ok(_lock) => {
+                    fs::remove_file(&file.metadata.path).await?;
+                    self.db.remove(file.id).await?;
+                    return Ok(());
+                }
+                Err(FileLockError::AlreadyLocked) => continue,
+                Err(FileLockError::Io(err)) => return Err(err.into()),
+            }
+        }
+        Err(StorageError::EvictionFailed)
+    }
 }
 
 impl StorageManager {
@@ -207,8 +258,9 @@ mod tests {
     use super::StorageManager;
     use crate::database::mocks::MockStorageDatabaseExt;
     use crate::file::{File, FileId, FileMetadata, FileSource, FileStatus, StorePolicy};
+    use crate::storage_config::{EvictionPolicy, StorageConfig};
     use bytes::Bytes;
-    use chrono::Utc;
+    use chrono::{DateTime, TimeDelta, Utc};
     use tokio::fs;
 
     #[derive(Debug)]
@@ -374,5 +426,68 @@ mod tests {
             .await
             .expect("read content");
         assert_eq!(content.as_str(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_evict_one_file() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let stored_file_path_1 = tmp.path().join("file1");
+        fs::File::create(&stored_file_path_1).await.unwrap();
+
+        let stored_file_path_2 = tmp.path().join("file2");
+        fs::File::create(&stored_file_path_2).await.unwrap();
+
+        let file1 = File {
+            database: "someurl".to_string(),
+            id: 1.into(),
+            status: FileStatus::Ready,
+            metadata: FileMetadata {
+                path: stored_file_path_1.clone(),
+                last_used: DateTime::<Utc>::MIN_UTC,
+                source: FileSource::Custom("".to_string()),
+                filename: Default::default(),
+                store_policy: Default::default(),
+                created: Default::default(),
+            },
+        };
+
+        let file2 = File {
+            database: "someurl".to_string(),
+            id: 2.into(),
+            status: FileStatus::Ready,
+            metadata: FileMetadata {
+                path: stored_file_path_2.clone(),
+                last_used: DateTime::<Utc>::MIN_UTC + TimeDelta::seconds(1),
+                source: FileSource::Custom("".to_string()),
+                filename: Default::default(),
+                store_policy: Default::default(),
+                created: Default::default(),
+            },
+        };
+
+        let mut mock = MockStorageDatabaseExt::new();
+
+        mock.expect_order_by_last_used()
+            .return_once(move || Ok(vec![file1, file2]));
+
+        mock.expect_remove()
+            .withf(|id| *id == 1i32.into())
+            .return_once(|_| Ok(()));
+
+        let config = StorageConfig {
+            eviction_policy: EvictionPolicy::Lru,
+        };
+
+        let manager = StorageManager::<MockStorageDatabaseExt> {
+            db: mock,
+            dir: tmp.path().to_path_buf(),
+            config,
+        };
+
+        manager.evict_one_file().await.expect("evict one file");
+
+        assert!(!stored_file_path_1.exists());
+        assert!(stored_file_path_2.exists());
     }
 }

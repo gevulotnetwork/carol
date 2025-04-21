@@ -89,6 +89,7 @@ pub async fn get_by_source(connection: &mut Connection, source: &str) -> Databas
 }
 
 /// Get entry from database by its cache path field.
+#[allow(dead_code)]
 pub async fn get_by_cache_path(
     connection: &mut Connection,
     cache_path: &str,
@@ -111,6 +112,7 @@ pub async fn get_by_cache_path(
 }
 
 /// Get all cache entries with given `status`.
+#[allow(dead_code)]
 pub async fn get_by_status(
     connection: &mut Connection,
     status: FileStatus,
@@ -152,7 +154,34 @@ pub async fn update_status(
         .map_err(Into::into)
 }
 
+pub async fn order_by_created(connection: &mut Connection) -> DatabaseResult<Vec<File>> {
+    connection
+        .transaction(|conn| {
+            async {
+                trace!("SELECT * ORDER BY created");
+                files.order_by(dsl::created).get_results(conn).await
+            }
+            .scope_boxed()
+        })
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn order_by_last_used(connection: &mut Connection) -> DatabaseResult<Vec<File>> {
+    connection
+        .transaction(|conn| {
+            async {
+                trace!("SELECT * ORDER BY last_used");
+                files.order_by(dsl::last_used).get_results(conn).await
+            }
+            .scope_boxed()
+        })
+        .await
+        .map_err(Into::into)
+}
+
 /// Get all "stale" cache entries from the database.
+#[allow(dead_code)]
 pub async fn get_all_stale(_connection: &mut Connection) -> DatabaseResult<Vec<File>> {
     // connection
     //     .transaction(|conn| {
@@ -196,7 +225,7 @@ mod tests {
     use crate::sqlite::error::DatabaseError;
     use crate::sqlite::fixtures::{database, database_with_single_entry, SqliteDatabaseFixture};
     use crate::sqlite::models::StorePolicy;
-    use chrono::Utc;
+    use chrono::{TimeDelta, Utc};
     use rstest::rstest;
     use tracing_test::traced_test;
 
@@ -352,10 +381,6 @@ mod tests {
     async fn test_delete(
         #[future]
         #[from(database_with_single_entry)]
-        #[with(NewFile {
-            status: FileStatus::ToRemove,
-            ..SqliteDatabaseFixture::default_new_entry()
-        })]
         fixture: (SqliteDatabaseFixture, File),
     ) {
         let (db_fixture, inserted_entry) = fixture;
@@ -364,5 +389,99 @@ mod tests {
             .expect("remove entry");
         let all = get_all(db_fixture.conn().await.as_mut()).await.unwrap();
         assert!(all.is_empty());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[traced_test]
+    #[awt]
+    async fn test_order_by_created(
+        #[future]
+        #[from(database)]
+        fixture: SqliteDatabaseFixture,
+    ) {
+        let now = Utc::now();
+
+        let file1 = insert(
+            fixture.conn().await.as_mut(),
+            NewFile {
+                created: now,
+                cache_path: "1".to_string(),
+                ..SqliteDatabaseFixture::default_new_entry()
+            },
+        )
+        .await
+        .unwrap();
+        let file2 = insert(
+            fixture.conn().await.as_mut(),
+            NewFile {
+                created: now - TimeDelta::seconds(1),
+                cache_path: "2".to_string(),
+                ..SqliteDatabaseFixture::default_new_entry()
+            },
+        )
+        .await
+        .unwrap();
+        let file3 = insert(
+            fixture.conn().await.as_mut(),
+            NewFile {
+                created: now + TimeDelta::seconds(1),
+                cache_path: "3".to_string(),
+                ..SqliteDatabaseFixture::default_new_entry()
+            },
+        )
+        .await
+        .unwrap();
+        let all = order_by_created(fixture.conn().await.as_mut())
+            .await
+            .expect("order by created");
+        assert_eq!(all, vec![file2, file1, file3]);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    #[traced_test]
+    #[awt]
+    async fn test_order_by_last_used(
+        #[future]
+        #[from(database)]
+        fixture: SqliteDatabaseFixture,
+    ) {
+        let now = Utc::now();
+
+        let file1 = insert(
+            fixture.conn().await.as_mut(),
+            NewFile {
+                last_used: now,
+                cache_path: "1".to_string(),
+                ..SqliteDatabaseFixture::default_new_entry()
+            },
+        )
+        .await
+        .unwrap();
+        let file2 = insert(
+            fixture.conn().await.as_mut(),
+            NewFile {
+                last_used: now - TimeDelta::seconds(1),
+                cache_path: "2".to_string(),
+                ..SqliteDatabaseFixture::default_new_entry()
+            },
+        )
+        .await
+        .unwrap();
+        let file3 = insert(
+            fixture.conn().await.as_mut(),
+            NewFile {
+                last_used: now + TimeDelta::seconds(1),
+                cache_path: "3".to_string(),
+                ..SqliteDatabaseFixture::default_new_entry()
+            },
+        )
+        .await
+        .unwrap();
+        let all = order_by_last_used(fixture.conn().await.as_mut())
+            .await
+            .expect("order by last used");
+        assert_eq!(all, vec![file2, file1, file3]);
     }
 }

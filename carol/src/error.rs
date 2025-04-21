@@ -35,6 +35,9 @@ pub enum StorageError<E: StorageDatabaseError> {
 
     #[error("storage directory path is not absolute")]
     StorageDirectoryPathIsNotAbsolute,
+
+    #[error("failed to evict files from storage")]
+    EvictionFailed,
 }
 
 impl<E: StorageDatabaseError> StorageError<E> {

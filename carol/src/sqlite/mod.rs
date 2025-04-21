@@ -20,7 +20,6 @@ use tracing::trace;
 use crate::database::{StorageDatabase, StorageDatabaseExt};
 use crate::file::{File, FileId, FileMetadata, FileSource, FileStatus};
 
-#[allow(dead_code)]
 mod api;
 mod models;
 mod schema;
@@ -197,6 +196,15 @@ impl StorageDatabase for SqliteStorageDatabase {
 
 #[async_trait]
 impl StorageDatabaseExt for SqliteStorageDatabase {
+    async fn select_all(&self) -> DatabaseResult<Vec<File>> {
+        let mut conn = self.pool.get().await?;
+        let files = api::get_all(conn.as_mut()).await?;
+        Ok(files
+            .into_iter()
+            .map(|file| self.model_to_file(file))
+            .collect::<Result<_, _>>()?)
+    }
+
     async fn select_by_source(&self, source: &FileSource) -> DatabaseResult<Vec<File>> {
         let mut conn = self.pool.get().await?;
         let files = api::get_by_source(conn.as_mut(), source.as_str()).await?;
@@ -206,10 +214,28 @@ impl StorageDatabaseExt for SqliteStorageDatabase {
             .collect::<Result<_, _>>()?)
     }
 
-    async fn update_status(&self, id: FileId, new_status: FileStatus) -> Result<File, Self::Error> {
+    async fn update_status(&self, id: FileId, new_status: FileStatus) -> DatabaseResult<File> {
         let mut conn = self.pool.get().await?;
         let file = api::update_status(conn.as_mut(), id.into(), new_status.into()).await?;
         Ok(self.model_to_file(file)?)
+    }
+
+    async fn order_by_created(&self) -> DatabaseResult<Vec<File>> {
+        let mut conn = self.pool.get().await?;
+        let files = api::order_by_created(conn.as_mut()).await?;
+        Ok(files
+            .into_iter()
+            .map(|file| self.model_to_file(file))
+            .collect::<Result<_, _>>()?)
+    }
+
+    async fn order_by_last_used(&self) -> DatabaseResult<Vec<File>> {
+        let mut conn = self.pool.get().await?;
+        let files = api::order_by_last_used(conn.as_mut()).await?;
+        Ok(files
+            .into_iter()
+            .map(|file| self.model_to_file(file))
+            .collect::<Result<_, _>>()?)
     }
 }
 

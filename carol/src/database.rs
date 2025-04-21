@@ -27,10 +27,23 @@ pub trait StorageDatabase: Clone + Sized + Send + Sync {
     async fn remove(&self, id: FileId) -> Result<(), Self::Error>;
 }
 
+// TODO: this trait doesn't look good, probably needs refactoring
 #[async_trait]
 pub trait StorageDatabaseExt: StorageDatabase {
+    /// Get all files from database.
+    async fn select_all(&self) -> Result<Vec<File>, Self::Error>;
+
+    /// Get files matching given source from database.
     async fn select_by_source(&self, source: &FileSource) -> Result<Vec<File>, Self::Error>;
+
+    /// Update status of a file with given ID.
     async fn update_status(&self, id: FileId, new_status: FileStatus) -> Result<File, Self::Error>;
+
+    /// Get all files ordered by "created" timestamp. The earliest comes first.
+    async fn order_by_created(&self) -> Result<Vec<File>, Self::Error>;
+
+    /// Get all files ordered by "last used" timestamp. The earliest comes first.
+    async fn order_by_last_used(&self) -> Result<Vec<File>, Self::Error>;
 }
 
 #[cfg(test)]
@@ -94,8 +107,11 @@ pub mod mocks {
 
         #[async_trait]
         impl StorageDatabaseExt for StorageDatabaseExt {
+            async fn select_all(&self) -> Result<Vec<File>, MockStorageDatabaseError>;
             async fn select_by_source(&self, source: &FileSource) -> Result<Vec<File>, MockStorageDatabaseError>;
             async fn update_status(&self, id: FileId, new_status: FileStatus) -> Result<File, MockStorageDatabaseError>;
+            async fn order_by_created(&self) -> Result<Vec<File>, MockStorageDatabaseError>;
+            async fn order_by_last_used(&self) -> Result<Vec<File>, MockStorageDatabaseError>;
         }
     }
 }
