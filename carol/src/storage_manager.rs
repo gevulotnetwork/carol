@@ -140,6 +140,81 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
             .await
     }
 
+    /// Move local file into the storage. This will remove the source file.
+    ///
+    /// "Create" and "last used" timestamps of the file will be set to `Utc::now()`.
+    /// File path is defined by [`Self::path_from_source`].
+    ///
+    /// **Note:** in case that storage and local file are on a different devices, file will be
+    /// copied with [`Self::copy_local_file`]. In that case there is a chance that the file will be
+    /// succesfully copied into the storage, but won't be removed from source path due to some
+    /// error. If one knows that storage is located on a different device, then it is recommended
+    /// to use [`Self::copy_local_file`] directly instead.
+    pub async fn move_local_file(
+        &self,
+        source: FileSource,
+        store_policy: StorePolicy,
+        filename: Option<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<File, StorageError<D::Error>> {
+        let source_path = path.as_ref();
+        let path = self.path_from_source(&source);
+
+        match fs::rename(source_path, &path).await {
+            Err(err) if err.kind() == IoErrorKind::CrossesDevices => {
+                let file = self
+                    .copy_local_file(source, store_policy, filename, source_path)
+                    .await?;
+                fs::remove_file(source_path).await?;
+                Ok(file)
+            }
+            Err(err) => Err(err.into()),
+            Ok(_) => {
+                let now = Utc::now();
+                let metadata = FileMetadata {
+                    source: source.clone(),
+                    filename,
+                    path: path.clone(),
+                    store_policy,
+                    created: now,
+                    last_used: now,
+                };
+                let run = async || -> Result<File, StorageError<D::Error>> {
+                    let id = self.db.store(metadata).await?;
+                    let file = self.db.update_status(id, FileStatus::Ready).await?;
+                    Ok(file)
+                };
+                let revert = async || -> Result<(), StorageError<D::Error>> {
+                    fs::rename(&path, source_path).await.map_err(Into::into)
+                };
+
+                match run().await {
+                    Ok(file) => Ok(file),
+                    Err(err) => {
+                        revert().await?;
+                        Err(err)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Add new file to storage with given content.
+    ///
+    /// "Create" and "last used" timestamps of the file will be set to `Utc::now()`.
+    /// File path is defined by [`Self::path_from_source`].
+    pub async fn add_file(
+        &self,
+        source: FileSource,
+        store_policy: StorePolicy,
+        filename: Option<String>,
+        content: Bytes,
+    ) -> Result<File, StorageError<D::Error>> {
+        let stream = tokio_stream::once(Ok::<_, std::convert::Infallible>(content));
+        self.add_file_from_stream(source, store_policy, filename, stream)
+            .await
+    }
+
     /// Find file in storage by its source.
     pub async fn find_by_source(
         &self,
