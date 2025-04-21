@@ -11,7 +11,7 @@ pub struct NonUtf8PathError;
 /// Carol storage error.
 #[derive(thiserror::Error, Debug)]
 pub enum StorageError<E: StorageDatabaseError> {
-    /// Storage database releated error
+    /// Storage database related error
     #[error("database error")]
     DatabaseError(#[from] E),
 

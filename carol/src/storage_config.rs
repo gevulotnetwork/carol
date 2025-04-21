@@ -29,7 +29,7 @@ pub struct StorageConfig {
     /// space. It is recommended for users to manually restrict the size of the storage, e.g. by
     /// placing it on a separate filesystem.
     ///
-    /// When "no space left" error occures, storage manager will invoke this policy in attemp to
+    /// When "no space left" error occurs, storage manager will invoke this policy in attempt to
     /// free space.
     ///
     /// Default eviction policy is [`EvictionPolicy::Lru`].
