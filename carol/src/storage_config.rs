@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// Storage eviction policy.
@@ -18,6 +20,16 @@ pub enum EvictionPolicy {
     ///
     /// Randomly picked file will be removed.
     Random,
+}
+
+impl fmt::Display for EvictionPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Lru => "LRU",
+            Self::Fifo => "FIFO",
+            Self::Random => "Random",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]

@@ -142,7 +142,7 @@ pub async fn update_status(
     connection
         .immediate_transaction(|conn| {
             async {
-                trace!("UPDATE SET status={} WHERE id={}, ", status, pk);
+                trace!("UPDATE SET status={} WHERE id={}", status, pk);
                 diesel::update(files.find(pk))
                     .set(dsl::status.eq(status))
                     .get_result(conn)

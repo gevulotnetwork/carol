@@ -11,6 +11,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::time;
 use tokio_util::codec::{BytesCodec, FramedRead};
+use tracing::{debug, trace};
 
 use crate::database::{StorageDatabase, StorageDatabaseError, StorageDatabaseExt};
 use crate::error::{Error, FreeSpaceError, StoragePathError};
@@ -69,6 +70,10 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         S: Stream<Item = Result<Bytes, E>> + Unpin,
         E: StdError + 'static + Send + Sync,
     {
+        debug!(
+            "add_file_from_stream(source={:?}, store_policy={:?}, filename={:?})",
+            source, store_policy, filename
+        );
         let path = self.path_from_source(&source);
         let now = Utc::now();
         let metadata = FileMetadata {
@@ -82,8 +87,10 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
 
         match self.db.store(metadata).await {
             Ok(id) => {
+                debug!("CACHE MISS");
                 let mut run = async || -> Result<File, Error> {
                     let mut output = fs::File::create_new(&path).await?;
+                    trace!("writing {}", path.display());
                     while let Some(chunk_result) = stream.next().await {
                         let chunk = chunk_result.map_err(|err| Error::other(Box::new(err)))?;
                         self.write_chunk(&chunk, &mut output).await?;
@@ -107,6 +114,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                 }
             }
             Err(err) if err.is_unique_violation() => {
+                debug!("CACHE HIT");
                 // FIXME: looping is probably not the best approach
                 let file = loop {
                     match self.find_by_source(&source).await? {
@@ -233,8 +241,10 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                 if err.kind() == IoErrorKind::StorageFull
                     || err.kind() == IoErrorKind::QuotaExceeded =>
             {
+                trace!("{:?}", err);
                 // If "no space left" occured, evict some file from storage and retry writing
                 if self.evict_one_file().await.is_ok() {
+                    trace!("re-trying writing chunk ({} bytes)", chunk.len());
                     Box::pin(self.write_chunk(chunk, output)).await
                 } else {
                     Err(err)
@@ -246,6 +256,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
 
     /// Evicts one file from storage using current eviction policy.
     /// Return `Ok(())` if some file was succesfully evicted and error otherwise.
+    #[tracing::instrument(skip(self), fields(policy = %self.config.eviction_policy))]
     async fn evict_one_file(&self) -> Result<(), Error> {
         // TODO: optimize preformance (avoid selecting all files at once)
         async fn inner<D: StorageDatabaseExt>(this: &StorageManager<D>) -> Result<(), Error> {
@@ -264,6 +275,7 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                     Ok(_lock) => {
                         fs::remove_file(&file.metadata.path).await?;
                         this.db.remove(file.id).await?;
+                        debug!("evicted file={:?}", file);
                         return Ok(());
                     }
                     Err(FileLockError::AlreadyLocked) => continue,
