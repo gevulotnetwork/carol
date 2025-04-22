@@ -46,11 +46,39 @@ let file = manager
     .unwrap();
 ```
 
+## Limiting storage size
+
+Carol itself doesn't have a mechanism to limit the total stored files size. However it does use
+eviction policies when it faces "no space left" errors in attempt to free some space in the storage.
+
+That means that you can limit your storage size with different ways:
+
+- By using Linux [quota][3]
+- By placing storage on a separate filesystem of desired size
+
+Here is an example on how you can do the latter approach on Linux:
+
+```shell
+# Create filesystem image file of 1 GB
+dd if=/dev/zero of=carol.img bs=4k count=250000
+
+# Create an EXT4 filesystem on the image
+mkfs.ext4 carol.img
+
+# Mount the filesystem
+mkdir /var/cache/carol
+mount -o loop carol.img /var/cache/carol
+
+# Now you can use "/var/cache/carol" path as a storage path for Carol manager
+# When the storage will fill up, adding new files will evict old ones according to your specified policy
+```
+
 ## Roadmap
 
-- [ ] Proper storage eviction
-- [ ] Advisory locks for stored files
+- [x] Proper storage eviction
+- [x] Advisory locks for stored files
 - [ ] CLI interface for storage manager
 
 [1]: <https://github.com/gevulotnetwork/carol/tree/main/carol-reqwest-middleware>
 [2]: <https://crates.io/crates/reqwest>
+[3]: <https://docs.kernel.org/filesystems/quota.html>
