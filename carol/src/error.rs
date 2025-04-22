@@ -5,6 +5,7 @@ use std::fmt;
 use std::io::Error as IoError;
 
 use crate::database::StorageDatabaseError;
+use crate::file::FileLockError;
 
 pub type BoxError = Box<dyn StdError + Send + Sync>;
 
@@ -71,6 +72,7 @@ impl fmt::Display for Error {
             ErrorKind::AwaitingError => "failed to wait for file to become available",
             ErrorKind::InitializationError => "failed to initialize storage manager",
             ErrorKind::EvictionError => "failed to free space in storage",
+            ErrorKind::FileLockError => "file locking error",
             ErrorKind::Other => "custom error",
         })
     }
@@ -100,6 +102,15 @@ impl From<IoError> for Error {
     }
 }
 
+impl From<FileLockError> for Error {
+    fn from(error: FileLockError) -> Self {
+        Self {
+            kind: ErrorKind::FileLockError,
+            source: Some(Box::new(error)),
+        }
+    }
+}
+
 /// Kind of the [`Error`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -121,6 +132,9 @@ pub enum ErrorKind {
 
     /// Eviction related error.
     EvictionError,
+
+    /// File locking error.
+    FileLockError,
 
     /// Other error.
     Other,

@@ -18,7 +18,7 @@ pub trait StorageDatabase: Clone + Sized + Send + Sync {
     fn uri(&self) -> Self::Uri;
 
     /// Put new file into the database.
-    async fn store(&self, metadata: FileMetadata) -> Result<FileId, Self::Error>;
+    async fn store(&self, metadata: FileMetadata) -> Result<File, Self::Error>;
 
     /// Get file from the database.
     async fn get(&self, id: FileId) -> Result<File, Self::Error>;
@@ -81,7 +81,7 @@ pub mod mocks {
             type Error=MockStorageDatabaseError;
 
             fn uri(&self) -> String;
-            async fn store(&self, metadata: FileMetadata) -> Result<FileId, MockStorageDatabaseError>;
+            async fn store(&self, metadata: FileMetadata) -> Result<File, MockStorageDatabaseError>;
             async fn get(&self, id: FileId) -> Result<File, MockStorageDatabaseError>;
             async fn remove(&self, id: FileId) -> Result<(), MockStorageDatabaseError>;
         }
@@ -100,7 +100,7 @@ pub mod mocks {
             type Error=MockStorageDatabaseError;
 
             fn uri(&self) -> String;
-            async fn store(&self, metadata: FileMetadata) -> Result<FileId, MockStorageDatabaseError>;
+            async fn store(&self, metadata: FileMetadata) -> Result<File, MockStorageDatabaseError>;
             async fn get(&self, id: FileId) -> Result<File, MockStorageDatabaseError>;
             async fn remove(&self, id: FileId) -> Result<(), MockStorageDatabaseError>;
         }

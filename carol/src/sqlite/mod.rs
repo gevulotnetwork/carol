@@ -176,10 +176,10 @@ impl StorageDatabase for SqliteStorageDatabase {
         self.database_url.clone()
     }
 
-    async fn store(&self, metadata: FileMetadata) -> DatabaseResult<FileId> {
+    async fn store(&self, metadata: FileMetadata) -> DatabaseResult<File> {
         let mut conn = self.pool.get().await?;
         let file = api::insert(conn.as_mut(), models::NewFile::try_from(metadata)?).await?;
-        Ok(file.id.into())
+        Ok(self.model_to_file(file)?)
     }
 
     async fn get(&self, id: FileId) -> DatabaseResult<File> {

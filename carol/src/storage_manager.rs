@@ -86,22 +86,25 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         };
 
         match self.db.store(metadata).await {
-            Ok(id) => {
+            Ok(file) => {
                 debug!("CACHE MISS");
                 let mut run = async || -> Result<File, Error> {
                     let mut output = fs::File::create_new(&path).await?;
+                    // FIXME: possible TOCTOU bug
+                    let lock = file.try_lock(FileLockMode::Exclusive)?;
                     trace!("writing {}", path.display());
                     while let Some(chunk_result) = stream.next().await {
                         let chunk = chunk_result.map_err(|err| Error::other(Box::new(err)))?;
                         self.write_chunk(&chunk, &mut output).await?;
                     }
-                    let file = self.db.update_status(id, FileStatus::Ready).await?;
+                    let file = self.db.update_status(file.id, FileStatus::Ready).await?;
+                    lock.unlock()?;
                     Ok(file)
                 };
 
                 let revert = async || -> Result<(), Error> {
                     fs::remove_file(&path).await?;
-                    self.db.remove(id).await?;
+                    self.db.remove(file.id).await?;
                     Ok(())
                 };
 
@@ -192,8 +195,8 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
                     last_used: now,
                 };
                 let run = async || -> Result<File, Error> {
-                    let id = self.db.store(metadata).await?;
-                    let file = self.db.update_status(id, FileStatus::Ready).await?;
+                    let file = self.db.store(metadata).await?;
+                    let file = self.db.update_status(file.id, FileStatus::Ready).await?;
                     Ok(file)
                 };
                 let revert = async || -> Result<(), Error> {
@@ -397,6 +400,7 @@ mod tests {
         };
 
         let metadata_clone = metadata.clone();
+        let metadata_clone2 = metadata.clone();
         mock.expect_store()
             .withf(move |metadata| {
                 metadata.filename == metadata_clone.filename
@@ -404,7 +408,14 @@ mod tests {
                     && metadata.source == metadata_clone.source
                     && metadata.store_policy == store_policy
             })
-            .return_once(move |_| Ok(file_id));
+            .return_once(move |_| {
+                Ok(File {
+                    database: "someurl".to_string(),
+                    id: file_id,
+                    metadata: metadata_clone2,
+                    status: Default::default(),
+                })
+            });
 
         let database_url_clone = database_url.clone();
         mock.expect_update_status()
@@ -472,6 +483,7 @@ mod tests {
         };
 
         let metadata_clone = metadata.clone();
+        let metadata_clone2 = metadata.clone();
         mock.expect_store()
             .withf(move |metadata| {
                 metadata.filename == metadata_clone.filename
@@ -479,7 +491,14 @@ mod tests {
                     && metadata.source == metadata_clone.source
                     && metadata.store_policy == store_policy
             })
-            .return_once(move |_| Ok(file_id));
+            .return_once(move |_| {
+                Ok(File {
+                    database: "someurl".to_string(),
+                    id: file_id,
+                    metadata: metadata_clone2,
+                    status: Default::default(),
+                })
+            });
 
         let database_url_clone = database_url.clone();
         mock.expect_update_status()
