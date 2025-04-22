@@ -77,6 +77,7 @@ mount -o loop carol.img /var/cache/carol
 
 - [x] Proper storage eviction
 - [x] Advisory locks for stored files
+- [ ] Improve stability: avoid data races and add more testing
 - [ ] CLI interface for storage manager
 
 [1]: <https://github.com/gevulotnetwork/carol/tree/main/carol-reqwest-middleware>
