@@ -16,6 +16,7 @@ diesel = { version = "2.2.9", features = ["sqlite", "returning_clauses_for_sqlit
 diesel-async = { version = "0.5.2", features = ["async-connection-wrapper", "sqlite", "pool", "deadpool"] }
 diesel-enum = "0.2.1"
 diesel_migrations = "2.2.0"
+failpoints = "0.2.0"
 futures-util = { version = "0.3.31", features = ["io"] }
 rand = "0.9.1"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -33,6 +34,12 @@ anyhow = "1.0.98"
 mockall = "0.13.1"
 rstest = "0.25.0"
 tempfile = "3.19.1"
+test-log = { version = "0.2.17", default-features = false, features = ["color", "trace"] }
 tokio = { version = "1.44.2", features = ["rt", "macros"] }
 tokio-test = "0.4.4"
 tracing-test = "0.2.5"
+
+[[test]]
+name = "with-failpoints"
+path = "tests/with_failpoints/storage_full.rs"
+required-features = ["failpoints/failpoints"]

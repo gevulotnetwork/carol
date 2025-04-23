@@ -40,7 +40,7 @@ jobs:
       - name: Use Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Run linting
-        run: cargo clippy --no-deps --all-targets -- --deny warnings
+        run: cargo clippy --no-deps --all-targets --all-features -- --deny warnings
 
   check-build:
     name: Check build
@@ -58,7 +58,7 @@ jobs:
       - name: Run build check
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo check
+        run: cargo check --all-targets --all-features
 
   build-docs:
     name: Build docs
@@ -79,22 +79,21 @@ jobs:
         run: cargo doc --no-deps
 
   run-tests:
-    # We had a couple of situations where tests got deadlocked because of bugs in async code.
-    # In order to avoid that we use '--ensure-time' option for tests.
-    # That's why we have to run tests with nightly toolchain
     name: Run tests
     runs-on: ubuntu-24.04
+    # Just in case something is going to deadlock
+    timeout-minutes: 30
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly
+          toolchain: stable
           default: true
       - name: Use Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Run tests
-        env:
-          RUST_TEST_TIME_UNIT: "10000,60000"
-        run: cargo +nightly test -- -Z unstable-options --ensure-time
+        run: |
+          cargo test --all-targets --all-features
+          cargo test --test with-failpoints --features="failpoints/failpoints"

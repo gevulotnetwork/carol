@@ -239,15 +239,24 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
     /// Attempts to write chunk of bytes into file. If "no space left" error occurs, tries to evict
     /// as many files from storage as needed to free enough space.
     async fn write_chunk(&self, chunk: &Bytes, output: &mut fs::File) -> Result<(), IoError> {
-        match output.write_all(chunk).await {
+        #[inline]
+        async fn write(chunk: &Bytes, output: &mut fs::File) -> Result<(), IoError> {
+            // This failpoint is like a mock for testing
+            // Because of that failpoint we need to wrap write_all() into this function
+            failpoints::failpoint!("write-chunk-storage-full", |_| {
+                Err(IoError::from(IoErrorKind::StorageFull))
+            });
+            output.write_all(chunk).await
+        }
+
+        match write(chunk, output).await {
             Err(err)
                 if err.kind() == IoErrorKind::StorageFull
                     || err.kind() == IoErrorKind::QuotaExceeded =>
             {
-                trace!("{:?}", err);
+                trace!("I/O error: {:?} -> triggering eviction", err);
                 // If "no space left" occured, evict some file from storage and retry writing
                 if self.evict_one_file().await.is_ok() {
-                    trace!("re-trying writing chunk ({} bytes)", chunk.len());
                     Box::pin(self.write_chunk(chunk, output)).await
                 } else {
                     Err(err)
