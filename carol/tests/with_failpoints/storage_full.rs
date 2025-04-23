@@ -3,7 +3,7 @@ use failpoints::FailScenario;
 
 /// This tests that eviction is properly triggered by storage when encountering StorageFull error.
 #[test_log::test(tokio::test)]
-async fn test_storage_full() {
+async fn storage_full() {
     let temp = tempfile::tempdir().unwrap();
     let database_path = temp.path().join("carol.sqlite");
     let database_url = database_path.to_str().unwrap();

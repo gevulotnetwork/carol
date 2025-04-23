@@ -43,3 +43,8 @@ tracing-test = "0.2.5"
 name = "storage-full"
 path = "tests/with_failpoints/storage_full.rs"
 required-features = ["failpoints/failpoints"]
+
+[[test]]
+name = "move-crosses-devices"
+path = "tests/with_failpoints/move_crosses_devices.rs"
+required-features = ["failpoints/failpoints"]

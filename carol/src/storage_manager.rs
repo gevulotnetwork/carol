@@ -172,11 +172,27 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
         filename: Option<String>,
         path: impl AsRef<Path>,
     ) -> Result<File, Error> {
+        debug!(
+            "move_local_file(source={:?}, store_policy={:?}, filename={:?}, path={})",
+            source,
+            store_policy,
+            filename,
+            path.as_ref().display(),
+        );
         let source_path = path.as_ref();
         let path = self.path_from_source(&source);
+        let result = async || {
+            // This failpoint is like a mock for testing, it doesn't generate any code by default
+            // Because of this failpoint we need to wrap fs::rename() into a closure
+            failpoints::failpoint!("move-local-file-crosses-devices", |_| {
+                Err(IoError::from(IoErrorKind::CrossesDevices))
+            });
+            fs::rename(source_path, &path).await
+        };
 
-        match fs::rename(source_path, &path).await {
+        match result().await {
             Err(err) if err.kind() == IoErrorKind::CrossesDevices => {
+                trace!("I/O error: {:?} -> fallback to copying file", err);
                 let file = self
                     .copy_local_file(source, store_policy, filename, source_path)
                     .await?;
@@ -239,16 +255,16 @@ impl<D: StorageDatabaseExt> StorageManager<D> {
     /// Attempts to write chunk of bytes into file. If "no space left" error occurs, tries to evict
     /// as many files from storage as needed to free enough space.
     async fn write_chunk(&self, chunk: &Bytes, output: &mut fs::File) -> Result<(), IoError> {
-        let result = {
-            // This failpoint is like a mock for testing
-            // Because of that failpoint we need to wrap write_all() into a block
+        let mut result = async || {
+            // This failpoint is like a mock for testing, it doesn't generate any code by default
+            // Because of this failpoint we need to wrap write_all() into a closure
             failpoints::failpoint!("write-chunk-storage-full", |_| {
                 Err(IoError::from(IoErrorKind::StorageFull))
             });
             output.write_all(chunk).await
         };
 
-        match result {
+        match result().await {
             Err(err)
                 if err.kind() == IoErrorKind::StorageFull
                     || err.kind() == IoErrorKind::QuotaExceeded =>
@@ -362,11 +378,12 @@ impl StorageManager {
 #[cfg(test)]
 mod tests {
     use super::StorageManager;
-    use crate::database::mocks::MockStorageDatabaseExt;
+    use crate::database::mocks::{MockStorageDatabaseError, MockStorageDatabaseExt};
     use crate::file::{File, FileId, FileMetadata, FileSource, FileStatus, StorePolicy};
     use crate::storage_config::{EvictionPolicy, StorageConfig};
     use bytes::Bytes;
     use chrono::{DateTime, TimeDelta, Utc};
+    use mockall::predicate;
     use tokio::fs;
 
     #[derive(Debug)]
@@ -551,6 +568,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_move_local_file() {
+        // Set up initial data
+        let localtmp = tempfile::tempdir().unwrap();
+        let localfile_path = localtmp.path().join("localfile");
+        fs::write(&localfile_path, "hello world").await.unwrap();
+
+        let database_url = "someurl".to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let source = FileSource::Custom("somesource".to_string());
+        let store_policy = StorePolicy::StoreForever;
+        let filename = None;
+        let path = tmp
+            .path()
+            .join("6f87d01289b1845908a7c7ccd578fddbbcefd29f6144bbab658baa9f6aae2809");
+
+        // Set up database mock
+        let mut mock = MockStorageDatabaseExt::new();
+        let file_id = FileId::from(1i32);
+        let metadata = FileMetadata {
+            source: source.clone(),
+            filename: filename.clone(),
+            path: path.clone(),
+            store_policy,
+            created: Utc::now(),
+            last_used: Utc::now(),
+        };
+
+        let metadata_clone = metadata.clone();
+        let metadata_clone2 = metadata.clone();
+        mock.expect_store()
+            .withf(move |metadata| {
+                metadata.filename == metadata_clone.filename
+                    && metadata.path == metadata_clone.path
+                    && metadata.source == metadata_clone.source
+                    && metadata.store_policy == store_policy
+            })
+            .return_once(move |_| {
+                Ok(File {
+                    database: "someurl".to_string(),
+                    id: file_id,
+                    metadata: metadata_clone2,
+                    status: Default::default(),
+                })
+            });
+
+        let database_url_clone = database_url.clone();
+        mock.expect_update_status()
+            .withf(move |id, new_status| *id == file_id && *new_status == FileStatus::Ready)
+            .return_once(move |id, status| {
+                Ok(File {
+                    database: database_url_clone,
+                    id,
+                    status,
+                    metadata,
+                })
+            });
+
+        // Create manager
+        let manager = StorageManager::<MockStorageDatabaseExt> {
+            db: mock,
+            dir: tmp.path().to_path_buf(),
+            config: Default::default(),
+        };
+
+        let file = manager
+            .move_local_file(
+                source.clone(),
+                store_policy,
+                filename.clone(),
+                &localfile_path,
+            )
+            .await
+            .expect("move local file");
+
+        assert_eq!(file.database, database_url);
+        assert_eq!(file.id, file_id);
+        assert_eq!(file.status, FileStatus::Ready);
+        assert_eq!(file.metadata.filename, filename);
+        assert_eq!(file.metadata.path, path);
+        assert_eq!(file.metadata.source, source);
+        assert_eq!(file.metadata.store_policy, store_policy);
+        let content = fs::read_to_string(&file.metadata.path)
+            .await
+            .expect("read content");
+        assert_eq!(content.as_str(), "hello world");
+        assert!(!localfile_path.exists());
+    }
+
+    #[tokio::test]
     async fn test_evict_one_file() {
         let tmp = tempfile::tempdir().unwrap();
 
@@ -611,5 +717,59 @@ mod tests {
 
         assert!(!stored_file_path_1.exists());
         assert!(stored_file_path_2.exists());
+    }
+
+    #[tokio::test]
+    async fn test_add_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stored_file_path = tmp.path().join("file1");
+        fs::File::create(&stored_file_path).await.unwrap();
+        let source = FileSource::Custom("".to_string());
+        let metadata = FileMetadata {
+            path: stored_file_path.clone(),
+            last_used: Default::default(),
+            source: source.clone(),
+            filename: None,
+            store_policy: Default::default(),
+            created: Default::default(),
+        };
+        let file = File {
+            database: "someurl".to_string(),
+            id: 1.into(),
+            status: FileStatus::Ready,
+            metadata,
+        };
+
+        let mut mock = MockStorageDatabaseExt::new();
+        let mut unique_violation_err = MockStorageDatabaseError::new();
+        unique_violation_err
+            .expect_is_unique_violation()
+            .return_const(true);
+        mock.expect_store()
+            .return_once(|_| Err(unique_violation_err));
+        mock.expect_select_by_source()
+            .with(predicate::eq(source.clone()))
+            .return_once(move |source| {
+                Ok(vec![File {
+                    metadata: FileMetadata {
+                        source: source.clone(),
+                        ..file.metadata
+                    },
+                    ..file
+                }])
+            });
+
+        let manager = StorageManager::<MockStorageDatabaseExt> {
+            db: mock,
+            dir: tmp.path().to_path_buf(),
+            config: Default::default(),
+        };
+
+        let same_file = manager
+            .add_file(source, Default::default(), None, [].as_slice().into())
+            .await
+            .expect("add file");
+
+        assert_eq!(same_file.id, file.id);
     }
 }
