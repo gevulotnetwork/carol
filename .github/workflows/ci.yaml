@@ -96,4 +96,4 @@ jobs:
       - name: Run tests
         run: |
           cargo test --all-targets --all-features
-          cargo test --test with-failpoints --features="failpoints/failpoints"
+          cargo test --test storage-full --features="failpoints/failpoints"

@@ -40,6 +40,6 @@ tokio-test = "0.4.4"
 tracing-test = "0.2.5"
 
 [[test]]
-name = "with-failpoints"
+name = "storage-full"
 path = "tests/with_failpoints/storage_full.rs"
 required-features = ["failpoints/failpoints"]
